@@ -60,6 +60,7 @@ class Page(tk.Frame):
         # 兜底：源返回空详情（豆瓣壳源/接口失败）时补字段，避免 KeyError 炸渲染
         for k, dv in (("name", self.vod_name or ""), ("pic", ""), ("remark", ""),
                       ("actors", ""), ("director", ""), ("content", ""),
+                      ("year", ""), ("area", ""), ("lang", ""), ("cls", ""),
                       ("series_flags", []), ("series_urls", [])):
             info.setdefault(k, dv)
         self.info = info
@@ -76,14 +77,32 @@ class Page(tk.Frame):
         right.pack(side="left", fill="both", expand=True)
         tk.Label(right, text=info["name"], bg=BG, fg=FG,
                  font=tv_font(20, True), wraplength=700, justify="left").pack(anchor="w")
+        # 来源/年份/地区/语言/类型 chips（对应原版 tvSite/tvYear/tvArea/tvLang/tvType）
+        chips = []
+        if self.bean and self.bean.name:
+            chips.append(("源", self.bean.name))
+        for label, key in (("年份", "year"), ("地区", "area"),
+                           ("语言", "lang"), ("类型", "cls")):
+            if info.get(key):
+                chips.append((label, str(info[key])[:12]))
         if info["remark"]:
-            tk.Label(right, text=info["remark"], bg=BG, fg=ACCENT,
-                     font=tv_font(12)).pack(anchor="w", pady=4)
+            chips.append(("备注", info["remark"][:14]))
+        if chips:
+            chipbar = tk.Frame(right, bg=BG)
+            chipbar.pack(anchor="w", pady=3)
+            for label, val in chips:
+                tk.Label(chipbar, text=f" {label} {val} ", bg=PANEL, fg=FG_DIM,
+                         font=tv_font(9), padx=6, pady=1).pack(side="left", padx=3)
         for label, val in (("导演", info["director"]), ("主演", info["actors"])):
             if val:
                 tk.Label(right, text=f"{label}：{val[:80]}", bg=BG, fg=FG_DIM,
                          font=tv_font(10), wraplength=700,
                          justify="left").pack(anchor="w", pady=1)
+        # 播放地址行（对应原版 tvPlayUrl，随选中集更新）
+        self.playurl_lbl = tk.Label(right, text="", bg=BG, fg="#5A6B94",
+                                    font=tv_font(9), wraplength=700,
+                                    justify="left", anchor="w")
+        self.playurl_lbl.pack(anchor="w", pady=1)
 
         btns = tk.Frame(self.body, bg=BG)
         btns.pack(anchor="w", pady=12)
@@ -101,14 +120,17 @@ class Page(tk.Frame):
             first_ep = ""
             if info["series_urls"] and info["series_urls"][0]:
                 first_ep = info["series_urls"][0][0]
-            FocusLabel(btns, text="▶ 播放", bg=PANEL, fg=FG, font=tv_font(14, True),
+            FocusLabel(btns, text="▶ 播放", bg=ACCENT, fg="#FFFFFF",
+                       font=tv_font(14, True),
                        on_select=lambda: self._play(0, first_ep)).pack(side="left", padx=(0, 10))
-        FocusLabel(btns, text="☆ 收藏", bg=PANEL, fg=FG, font=tv_font(14, True),
-                   on_select=self._collect).pack(side="left")
+        FocusLabel(btns, text="🔍 快速搜索", bg="#4A90E2", fg="#FFFFFF",
+                   font=tv_font(14, True),
+                   on_select=self._quick_search).pack(side="left", padx=(0, 10))
+        FocusLabel(btns, text="☆ 收藏", bg="#E91E63", fg="#FFFFFF",
+                   font=tv_font(14, True),
+                   on_select=self._collect).pack(side="left", padx=(0, 10))
         FocusLabel(btns, text="⇅ 倒序", bg=PANEL, fg=FG, font=tv_font(14, True),
-                   on_select=self._reverse_eps).pack(side="left", padx=(10, 0))
-        FocusLabel(btns, text="🔍 快速搜索", bg=PANEL, fg=FG, font=tv_font(14, True),
-                   on_select=self._quick_search).pack(side="left", padx=(10, 0))
+                   on_select=self._reverse_eps).pack(side="left")
 
         if info["content"]:
             tk.Label(self.body, text=info["content"][:300], bg=BG, fg=FG_DIM,
@@ -182,6 +204,14 @@ class Page(tk.Frame):
             w.destroy()
         names = self.info["series_flags"][idx][1]
         urls = self.info["series_urls"][idx]
+        # 播放地址行（对应原版 tvPlayUrl）：显示当前选中集的真实地址
+        try:
+            sel = resume_ep if resume_ep is not None else 0
+            if urls and sel < len(urls):
+                self.playurl_lbl.configure(
+                    text=f"播放地址：{urls[sel][:120]}")
+        except Exception:
+            pass
         cols = 8
         btns = []
         for i, (n, u) in enumerate(zip(names, urls)):
@@ -223,62 +253,11 @@ class Page(tk.Frame):
         self._select_flag(self.cur_flag)
 
     def _quick_search(self):
-        """快速搜索（对应 QuickSearchDialog：5 线程并发搜全部可搜站点）"""
-        name = self.info["name"]
-        panel = tk.Toplevel(self)
-        panel.title(f"快速搜索：{name}")
-        panel.configure(bg=BG)
-        panel.transient(self.winfo_toplevel())
-        panel.geometry("860x540")
-        tk.Label(panel, text=f"快速搜索：{name}", bg=BG, fg=FG,
-                 font=tv_font(14, True)).pack(pady=(10, 4))
-        listf = tk.Frame(panel, bg=BG)
-        listf.pack(fill="both", expand=True, padx=16, pady=(0, 12))
-        canvas = tk.Canvas(listf, bg=BG, highlightthickness=0)
-        sb = tk.Scrollbar(listf, orient="vertical", command=canvas.yview)
-        inner = tk.Frame(canvas, bg=BG)
-        inner.bind("<Configure>", lambda e: canvas.configure(
-            scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        status = tk.Label(panel, text="搜索中...", bg=BG, fg=FG_DIM, font=tv_font(11))
-        status.pack(side="bottom", pady=6)
-        found = []
-        lock = __import__("threading").Lock()
-
-        def probe(bean):
-            from . import data_api
-            try:
-                vods = data_api.search_vods(bean, name)
-            except Exception:
-                return
-            rows = [(bean, vid, n, remark) for vid, n, pic, remark in vods
-                    if name in n and str(vid) != str(self.vod_id)]
-            with lock:
-                found.extend(rows)
-                ui_thread.run(lambda n0=len(found): status.configure(
-                    text=f"搜索中... 已找到 {n0} 条"))
-
-        def render():
-            for w in inner.winfo_children():
-                w.destroy()
-            for i, (bean, vid, n, remark) in enumerate(found[:80]):
-                FocusLabel(inner, text=f"{n[:16]}  ·  {bean.name}  {remark[:8]}",
-                           bg=PANEL, fg=FG, font=tv_font(11), pady=6,
-                           on_select=lambda b=bean, v=vid, nn=n: (
-                               panel.destroy(), self._open_other(b, v, nn))
-                           ).grid(row=i, column=0, sticky="ew", padx=4, pady=2)
-            status.configure(text=f"共 {len(found)} 条（来自其他站点）")
-        from concurrent.futures import ThreadPoolExecutor
-        beans = [b for b in apiconfig.api_config.source_bean_list if b.searchable == 1]
-        import threading
-        def run():
-            with ThreadPoolExecutor(max_workers=5) as ex:
-                list(ex.map(probe, beans))
-            ui_thread.run(render)
-        threading.Thread(target=run, daemon=True).start()
-
-    def _open_other(self, bean, vod_id, name):
-        self.app.switch(Page, source_key=bean.key, vod_id=vod_id, vod_name=name)
+        """快速搜索：跳搜索页搜片名（对应原版 tvQuickSearch → FastSearchActivity）"""
+        from .ui_search import Page as SearchPage, clean_keyword
+        name = clean_keyword(self.info.get("name") or self.vod_name)
+        self.app.switch(SearchPage, pre_key=None)
+        page = self.app.current
+        page.kw.delete(0, "end")
+        page.kw.insert(0, name)
+        page.do_search()

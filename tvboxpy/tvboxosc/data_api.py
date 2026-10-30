@@ -235,6 +235,18 @@ def search_vods(bean, wd):
     return vods
 
 
+def _clean_html(text):
+    """简介去 HTML 标签与实体（原版会走 Html.fromHtml，Python 侧直接剥掉）"""
+    if not text:
+        return ""
+    t = re.sub(r"<(br|/p|/div)[^>]*>", "\n", text, flags=re.I)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = (t.replace("&nbsp;", " ").replace("&amp;", "&")
+          .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+          .replace("&#39;", "'"))
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
 def get_detail(bean, vod_id):
     """对应获取详情，返回 dict: name/pic/remark/actors/director/content/
     series_flags=[(flag_name,[ep_name...])], series_urls=[[url...]]"""
@@ -246,7 +258,8 @@ def get_detail(bean, vod_id):
     else:
         cfg = extract_json(fetch_text(_cms_url(bean, f"ac=videolist&ids={vod_id}")))
     info = {"name": "", "pic": "", "remark": "", "actors": "", "director": "",
-            "content": "", "series_flags": [], "series_urls": []}
+            "content": "", "year": "", "area": "", "lang": "", "cls": "",
+            "series_flags": [], "series_urls": []}
     if not cfg or not cfg.get("list"):
         return info
     v = cfg["list"][0]
@@ -256,7 +269,11 @@ def get_detail(bean, vod_id):
         "remark": str(v.get("vod_remarks", "")),
         "actors": str(v.get("vod_actor", "")),
         "director": str(v.get("vod_director", "")),
-        "content": str(v.get("vod_content", "")).strip(),
+        "content": _clean_html(str(v.get("vod_content", ""))),
+        "year": str(v.get("vod_year", "") or v.get("vod_time", "")).strip(),
+        "area": str(v.get("vod_area", "")),
+        "lang": str(v.get("vod_lang", "")),
+        "cls": str(v.get("vod_class", "")),
     })
     flags = str(v.get("vod_play_from", ""))
     urls = str(v.get("vod_play_url", ""))
