@@ -1,0 +1,83 @@
+# ============================================================
+#  tvbox2exe / tvboxpy 本地仓库忽略规则
+# ============================================================
+
+# ---------- 构建产物 ----------
+build/
+dist/
+tvbox2exe/build/
+tvboxpy/build/
+tvboxpy/dist/
+**/__pycache__/
+*.pyc
+*.pyo
+*.spec.bak
+*.o
+*.obj
+*.pdb
+*.ilk
+
+# ---------- 运行期缓存 ----------
+.imgcache/
+tvboxpy/.imgcache/
+.jar_cache/
+tvboxpy/.jar_cache/
+.spider_cache/
+tvboxpy/.spider_cache/
+*.log
+
+# ---------- 大型二进制/第三方依赖 ----------
+*.exe
+*.dll
+*.so
+*.so.*
+*.a
+*.lib
+*.dylib
+*.apk
+*.aar
+*.jar
+*.7z
+*.zip
+*.mp4
+*.mkv
+third_party/mpv/
+tvboxpy/third_party/mpv/
+tvbox2exe/third_party/mpv/
+app/libs/
+
+# ---------- 运行期数据库/状态 ----------
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ---------- 截图与临时排查产物 ----------
+/shot*.png
+/t_*.png
+/tvboxpy/t_*.png
+/tvboxpy/t_*.txt
+/tvboxpy/t_try.mp4
+/tvboxpy/屏幕截图*.png
+/sim*.log
+/javac.log
+/detail_dbg.log
+/search_dbg.log
+/posters_dbg*.log
+
+# ---------- 上游参考工程（各自独立，不纳入本仓库）----------
+# 必须加前导 / 锚定根目录：Windows 大小写不敏感，
+# 裸写 TVBoxOSC/ 会连 tvboxpy/tvboxosc/（本工程源码）一起忽略
+/TVBoxOSC/
+/tvboxosc-python/
+
+# ---------- 智能体工作目录 ----------
+.workbuddy/
+
+# ---------- 系统/编辑器 ----------
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
+*.swp
