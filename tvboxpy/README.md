@@ -35,6 +35,10 @@ tvboxpy/
 
 ## 运行
 
+> ### ⚠️ 强烈建议先安装 Java 环境（JDK 17+）
+>
+> 现代影视源大多是 **Jar 爬虫站点**，不装 Java 这些源会全部打不开（报「未找到 java 运行时」）。请安装 [Microsoft OpenJDK 17](https://learn.microsoft.com/java/openjdk/download)（或任意 JDK/JRE 17+），确保 `java` 在 PATH 中即可。JS 爬虫站点还需要 [Node.js](https://nodejs.org/) 16+。两者都装上，绝大多数接口配置里的源都能正常打开。
+
 依赖：Python 3.10+，`pip install requests python-mpv`，以及 [libmpv](https://github.com/shinchiro/mpv-winbuild-cmake/releases) 的 `libmpv-2.dll`（放入 `third_party/mpv/`，`include/` 头文件已随仓库提供）。
 
 ```

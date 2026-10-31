@@ -15,8 +15,19 @@
 
 1. 解压到任意可写目录
 2. 双击 `tvboxpy.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
-3. CMS 类站点开箱即用；JS 站点需本机有 Node.js，Jar 站点需 JDK 17+（资产已附带）
-4. 首次运行如遇 SmartScreen 拦截，点「更多信息 → 仍要运行」
+3. 首次运行如遇 SmartScreen 拦截，点「更多信息 → 仍要运行」
+
+> ### ⚠️ 强烈建议先安装 Java 环境（JDK 17+）
+>
+> 现代影视源的爬虫大多是 **Jar 爬虫**（`.jar` 类型的站点源），**不装 Java 这些源会全部打不开**（报「未找到 java 运行时」）。请先安装 [Microsoft OpenJDK 17](https://learn.microsoft.com/java/openjdk/download)（或任意 JDK/JRE 17+），安装后确保 `java` 命令在 PATH 中即可，无需其他配置。
+>
+> | 站点源类型 | 需要的环境 |
+> |---|---|
+> | CMS 站点（type 0/1） | 开箱即用 |
+> | JS 爬虫站点 | 需安装 [Node.js](https://nodejs.org/) 16+ |
+> | Jar 爬虫站点（最常见） | **需安装 JDK/JRE 17+** |
+>
+> 建议两个都装上：`Node.js` + `JDK 17+`，这样绝大多数接口配置里的源都能正常打开。
 
 ---
 
