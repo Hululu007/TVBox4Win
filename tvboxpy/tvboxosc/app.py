@@ -1,6 +1,6 @@
 """主窗口 + 页面路由（对应 AppManager / HomeActivity 的页面切换）"""
 import tkinter as tk
-from . import ui_thread
+from . import ui_thread, VERSION
 
 from .theme import BG
 
@@ -9,7 +9,7 @@ class App(tk.Tk):
     """对应 HomeActivity：承载所有页面 Frame，模拟 Android Activity 栈"""
     def __init__(self):
         super().__init__()
-        self.title("TVBox")
+        self.title(f"TVBox v{VERSION}")
         self.geometry("1280x720")
         self.configure(bg=BG)
         self.container = tk.Frame(self, bg=BG)

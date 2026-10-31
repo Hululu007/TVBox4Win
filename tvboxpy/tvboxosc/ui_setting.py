@@ -7,7 +7,7 @@ import os
 import shutil
 import tkinter as tk
 
-from . import hawk, ui_thread
+from . import hawk, ui_thread, VERSION
 from .apiconfig import api_config
 from .theme import (BG, FG, FG_DIM, ACCENT, FOCUS_BG, FOCUS_FG,
                     FocusLabel, tv_font, PANEL)
@@ -271,7 +271,7 @@ class Page(tk.Frame):
         n_sites = len(api_config.source_bean_list)
         n_lives = len(api_config.lives)
         self._info_dialog("关于", (
-            f"TVBox 复刻版（Python + tkinter + libmpv）\n"
+            f"TVBox 复刻版 v{VERSION}（Python + tkinter + libmpv）\n"
             f"当前配置：{n_sites} 个点播源 · {n_lives} 个直播源\n"
             f"功能：点播(CMS/Spider/py) · 直播 · 搜索 · 历史收藏 · 推送 · 设置"))
 
