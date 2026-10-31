@@ -1,4 +1,4 @@
-# tvboxpy — TVBox 复刻（Python 版）
+# TVBox4Win — TVBox 复刻（Python 版）
 
 用 **Python 3 + tkinter + libmpv** 在 Windows 桌面上复刻 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC)（安卓 TV 端影视聚合播放器）的核心功能：
 

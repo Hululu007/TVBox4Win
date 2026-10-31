@@ -2,7 +2,7 @@
 """一键打包 tvboxpy.exe（每次改完代码跑这个）
 
 用法: python build_exe.py
-产出: dist/tvboxpy.exe（onefile，同目录带 jvmrt/dex-tools 资产）
+产出: dist/TVBox4Win.exe（onefile，同目录带 jvmrt/dex-tools 资产）
 """
 import os
 import shutil
@@ -46,9 +46,9 @@ def main():
     size = sum(
         os.path.getsize(os.path.join(r, f))
         for r, _, fs in os.walk(os.path.join(DIST, "jvmrt")) for f in fs)
-    size += os.path.getsize(os.path.join(DIST, "tvboxpy.exe"))
+    size += os.path.getsize(os.path.join(DIST, "TVBox4Win.exe"))
     print("== 完成: %s (exe+资产 %.0f MB) ==" % (
-        os.path.join(DIST, "tvboxpy.exe"), size / 1048576))
+        os.path.join(DIST, "TVBox4Win.exe"), size / 1048576))
 
 
 if __name__ == "__main__":

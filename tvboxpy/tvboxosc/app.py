@@ -9,7 +9,7 @@ class App(tk.Tk):
     """对应 HomeActivity：承载所有页面 Frame，模拟 Android Activity 栈"""
     def __init__(self):
         super().__init__()
-        self.title(f"TVBox v{VERSION}")
+        self.title(f"TVBox4Win v{VERSION}")
         self.geometry("1280x720")
         self.configure(bg=BG)
         self.container = tk.Frame(self, bg=BG)

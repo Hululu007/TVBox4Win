@@ -1,6 +1,8 @@
-# tvboxpy — TVBox Windows 桌面复刻（Python 版）
+# TVBox4Win — TVBox Windows 桌面复刻（Python 版）
 
-当前版本：**v0.9.1**（版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox2EXE/releases) 下载）
+**TVBox4Win** = TVBox **for** Windows：把安卓 TV 上流行的影视聚合播放器 TVBox 完整搬到 Windows 桌面。
+
+当前版本：**v0.9.1**（版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
 
 把安卓 TV 上流行的影视聚合播放器 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 复刻到 Windows 桌面：
 **Python 3 + tkinter + libmpv** 实现，单文件 EXE 即可运行，UI 与交互按原版逐页对齐。
@@ -9,7 +11,7 @@
 
 ## 📥 免安装下载（推荐）
 
-不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox2EXE/releases/latest) 下载 `tvboxpy-v0.9.1-win64.zip`：
+不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases/latest) 下载 `tvboxpy-v0.9.1-win64.zip`：
 
 1. 解压到任意可写目录
 2. 双击 `tvboxpy.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
@@ -84,7 +86,7 @@ python build_exe.py
 
 产物：`tvboxpy/dist/tvboxpy.exe`（单文件）+ 同目录 `jvmrt/`、`dex-tools-v2.4/`（Jar 爬虫运行资产，发布时一并携带）。
 
-**运行资产下载**：Jar 爬虫运行时不入库，可从 [Releases](https://github.com/lddxmyg/TVBox2EXE/releases) 下载 `tvboxpy-runtime-assets.zip`，解压到 EXE 同目录即可（包含 `jvmrt/` 与 `dex-tools-v2.4/`）。
+**运行资产下载**：Jar 爬虫运行时不入库，可从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载 `tvboxpy-runtime-assets.zip`，解压到 EXE 同目录即可（包含 `jvmrt/` 与 `dex-tools-v2.4/`）。
 
 ## 📁 目录结构
 
@@ -144,7 +146,7 @@ main.py 启动
 - **启动后白屏/无站点**：默认接口依赖网络可达，可在设置 → 配置地址里换一个接口源。
 - **点影片没反应**：豆瓣壳源（msearch）点击会自动跳搜索页，与原版行为一致；个别慢源需等待嗅探解析。
 - **JS 站点报「未找到 node 运行时」**：安装 Node.js 并确保 `node` 在 PATH 中。
-- **Jar 站点报「未找到 java 运行时」**：安装 JDK 17+ 并确保 `java` 在 PATH 中；从 [Releases](https://github.com/lddxmyg/TVBox2EXE/releases) 下载运行资产包解压到 EXE 同目录。
+- **Jar 站点报「未找到 java 运行时」**：安装 JDK 17+ 并确保 `java` 在 PATH 中；从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载运行资产包解压到 EXE 同目录。
 - **播放黑屏**：多为该源地址失效，切换线路或换站点；可在设置中尝试软解码。
 
 ## 📜 致谢与声明

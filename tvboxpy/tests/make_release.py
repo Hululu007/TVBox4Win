@@ -6,7 +6,7 @@ import sys
 
 import requests
 
-REPO = "lddxmyg/TVBox2EXE"
+REPO = "lddxmyg/TVBox4Win"
 TAG = "v1.0.0"
 ASSET = r"D:\code\tvbox2exe\tvboxpy\tvboxpy-runtime-assets.zip"
 
@@ -36,7 +36,7 @@ your-dir/
 
 ## 源码运行
 
-见仓库 [README.md](https://github.com/lddxmyg/TVBox2EXE#readme)。
+见仓库 [README.md](https://github.com/lddxmyg/TVBox4Win#readme)。
 """
 
 

@@ -33,7 +33,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='tvboxpy',
+    name='TVBox4Win',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

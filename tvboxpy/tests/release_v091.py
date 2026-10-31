@@ -4,7 +4,7 @@ import subprocess
 
 import requests
 
-REPO = "lddxmyg/TVBox2EXE"
+REPO = "lddxmyg/TVBox4Win"
 OLD_TAG = "v1.0.0"
 NEW_TAG = "v0.9.1"
 ASSET = r"D:\code\tvbox2exe\tvboxpy\tvboxpy-v0.9.1-win64.zip"
@@ -26,7 +26,7 @@ dex-tools-v2.4/      dex→jar 转换工具链
 - CMS 类站点开箱即用；JS 爬虫站点需本机安装 Node.js
 - Jar 爬虫站点需本机安装 JDK 17+（本包已含 jvmrt 资产）
 - 首次运行可能被 SmartScreen 拦截：点「更多信息 → 仍要运行」
-- 详细说明见仓库 [README](https://github.com/lddxmyg/TVBox2EXE#readme)
+- 详细说明见仓库 [README](https://github.com/lddxmyg/TVBox4Win#readme)
 
 ## 🧩 tvboxpy-runtime-assets.zip
 
