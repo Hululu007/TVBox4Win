@@ -119,7 +119,11 @@ def _xml_detail(text):
         "remark": (v.findtext("note") or "").strip(),
         "actors": (v.findtext("actor") or "").strip(),
         "director": (v.findtext("director") or "").strip(),
-        "content": (v.findtext("des") or "").strip(),
+        "content": _clean_html(v.findtext("des") or ""),
+        "year": (v.findtext("year") or v.findtext("last") or "").strip(),
+        "area": (v.findtext("area") or "").strip(),
+        "lang": (v.findtext("lang") or "").strip(),
+        "cls": (v.findtext("type") or "").strip(),
     })
     for dd in v.iter("dd"):
         flag = dd.get("flag", "")
@@ -236,10 +240,13 @@ def search_vods(bean, wd):
 
 
 def _clean_html(text):
-    """简介去 HTML 标签与实体（原版会走 Html.fromHtml，Python 侧直接剥掉）"""
+    """简介去 HTML 标签与实体（原版会走 Html.fromHtml，Python 侧直接剥掉）
+    部分源在 CDATA 里存双重转义的 &lt;p&gt;，先 unescape 再剥标签"""
     if not text:
         return ""
-    t = re.sub(r"<(br|/p|/div)[^>]*>", "\n", text, flags=re.I)
+    import html as _html
+    t = _html.unescape(text)
+    t = re.sub(r"<(br|/p|/div)[^>]*>", "\n", t, flags=re.I)
     t = re.sub(r"<[^>]+>", "", t)
     t = (t.replace("&nbsp;", " ").replace("&amp;", "&")
           .replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
@@ -319,10 +326,16 @@ def _parse_json_api(api, page_url):
 
 
 def _sniff_page(page_url):
-    """页面嗅探兜底：在 HTML 里找第一个直链媒体地址"""
+    """页面嗅探兜底：在 HTML 里找直链媒体地址。
+    兼容 lz 等分享页的相对地址（var main = "/xxx/index.m3u8?sign=..."）"""
     text = fetch_text(page_url)
     if not text:
         return None
+    # 带引号的媒体串（含相对路径），urljoin 补全为绝对地址
+    m = re.search(r'''["']([^"']+?\.(?:m3u8|mp4|flv|mkv|avi)(?:\?[^"']*)?)["']''',
+                  text, re.I)
+    if m:
+        return urllib.parse.urljoin(page_url, m.group(1))
     m = re.search(r'https?://[^\s"\'<>\\]+?\.(?:m3u8|mp4|flv|mkv)[^\s"\'<>\\]*',
                   text, re.I)
     return m.group(0) if m else None
@@ -360,11 +373,29 @@ def _second_parse(bean, page_url, play_url):
 
 
 def get_play_url(bean, flag, ep_url):
-    """type3 站点播放前把选集 id 解析成真实播放地址（对应 playerContent）
-    parse==1 的页面链接自动走 parses/嗅探二次解析。
+    """播放前把选集地址解析成真实媒体地址（对应 SourceViewModel.getPlay）
+    - type3 走 playerContent；parse==1 的页面链接自动走 parses/嗅探二次解析
+    - type0/1 对应原版 isVideoFormat 判断：非媒体直链（网页/分享页）同样二次解析
     返回 (url, header)；header 为请求头 dict 或 None"""
     if not _is_spider(bean):
-        return ep_url, None
+        # 原版 type0/1：isVideoFormat(requestUrl) ? 直接播 : parse=1 二次解析
+        if _looks_media(ep_url) or not ep_url.startswith(("http://", "https://")):
+            return ep_url, None
+        # 分享页/网页直链：先嗅探页面直链（快，~1s），失败再试 parses 接口
+        try:
+            sniffed = _sniff_page(ep_url)
+        except Exception:
+            sniffed = None
+        if sniffed and _looks_media(sniffed):
+            return sniffed, None
+        try:
+            got = _second_parse(bean, ep_url,
+                                getattr(bean, "player_url", "") or "")
+        except Exception:
+            got = None
+        if got:
+            return got
+        return ep_url, None  # 解析失败原样返回，让播放器报错可见
     from .apiconfig import api_config
     from .spider import get_spider
     r = get_spider(bean).player_content(flag, ep_url, api_config.flags)

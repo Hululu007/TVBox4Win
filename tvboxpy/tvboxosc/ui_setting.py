@@ -16,6 +16,12 @@ DEFAULT_API = "https://cyao2q.github.io/files/m.json"
 
 # 首页推荐（对应 HawkConfig.HOME_REC：0 豆瓣热播 / 1 站点推荐 / 2 观看历史）
 HOME_REC_NAMES = {0: "豆瓣热播", 1: "站点推荐", 2: "观看历史"}
+# 解码方式（对应 IJK_CODEC：硬解码 / 软解码，映射 mpv hwdec auto/no）
+CODEC_NAMES = ("硬解码", "软解码")
+# 画面缩放（对应 PLAY_SCALE / PlayerHelper.getScaleName）
+SCALE_NAMES = {0: "默认", 1: "16:9", 2: "4:3", 3: "填充", 4: "原始"}
+# 历史记录上限（对应 HISTORY_NUM / HistoryHelper.hisNumArray）
+HIS_NUM_ARRAY = (30, 50, 100)
 
 
 class Page(tk.Frame):
@@ -48,6 +54,9 @@ class Page(tk.Frame):
         self._add_card(grid, "配置历史", full=True, cb=self._pick_hist)
         self._add_card(grid, "首页站源", cb=self._goto_grid)
         self._add_card(grid, "首页推荐", cb=self._pick_home_rec)
+        self._add_card(grid, "解码方式", cb=self._pick_codec)
+        self._add_card(grid, "画面缩放", cb=self._pick_scale)
+        self._add_card(grid, "历史上限", cb=self._pick_his_num)
         self._add_card(grid, "下次进入", cb=self._toggle_home_page)
         self._add_card(grid, "清空缓存", cb=self._clear_cache)
         self._add_card(grid, "关于", cb=self._show_about)
@@ -96,6 +105,20 @@ class Page(tk.Frame):
         self._set_value("首页站源", self._home_source_name())
         self._set_value("首页推荐", HOME_REC_NAMES.get(self._home_rec(),
                                                        HOME_REC_NAMES[1]))
+        try:
+            scale = int(hawk.get(hawk.PLAY_SCALE, 0))
+        except (TypeError, ValueError):
+            scale = 0
+        self._set_value("画面缩放", SCALE_NAMES.get(scale, "默认"))
+        self._set_value("解码方式",
+                        "软解码" if hawk.get(hawk.IJK_CODEC, "硬解码") == "软解码"
+                        else "硬解码")
+        try:
+            hn = int(hawk.get(hawk.HISTORY_NUM, 0))
+        except (TypeError, ValueError):
+            hn = 0
+        self._set_value("历史上限",
+                        f"{HIS_NUM_ARRAY[hn]} 条" if 0 <= hn < 3 else "30 条")
         self._set_value("下次进入", "直播" if self._home_page() == "live" else "点播")
         self._set_value("关于", "tvboxpy 1.0")
 
@@ -172,6 +195,55 @@ class Page(tk.Frame):
                                    f"返回主页即可看到效果")
         # 立刻回主页让用户看到效果（对应原版 Hawk 改动后首页重刷）
         self.after(260, self.app.go_home)
+
+    def _pick_codec(self):
+        """解码方式（对应 llMediaCodec → IJK_CODEC，映射 mpv hwdec）"""
+        cur = 0 if hawk.get(hawk.IJK_CODEC, "硬解码") != "软解码" else 1
+        self._select_dialog("请选择解码方式",
+                            list(enumerate(CODEC_NAMES)),
+                            cur, self._apply_codec)
+
+    def _apply_codec(self, value):
+        hawk.put(hawk.IJK_CODEC, CODEC_NAMES[value])
+        self._refresh_values()
+        self.status.configure(text=f"解码方式已切换为「{CODEC_NAMES[value]}」，"
+                                   f"下次播放生效")
+
+    def _pick_scale(self):
+        """画面缩放（对应 llScale → PLAY_SCALE）"""
+        try:
+            cur = int(hawk.get(hawk.PLAY_SCALE, 0))
+        except (TypeError, ValueError):
+            cur = 0
+        if cur not in SCALE_NAMES:
+            cur = 0
+        self._select_dialog("请选择默认画面缩放",
+                            [(v, SCALE_NAMES[v]) for v in sorted(SCALE_NAMES)],
+                            cur, self._apply_scale)
+
+    def _apply_scale(self, value):
+        hawk.put(hawk.PLAY_SCALE, value)
+        self._refresh_values()
+        self.status.configure(text=f"画面缩放已切换为「{SCALE_NAMES[value]}」，"
+                                   f"下次播放生效")
+
+    def _pick_his_num(self):
+        """历史记录上限（对应 llHistoryNum → HISTORY_NUM）"""
+        try:
+            cur = int(hawk.get(hawk.HISTORY_NUM, 0))
+        except (TypeError, ValueError):
+            cur = 0
+        if cur not in (0, 1, 2):
+            cur = 0
+        self._select_dialog("保留历史记录数量",
+                            [(v, f"{HIS_NUM_ARRAY[v]} 条") for v in (0, 1, 2)],
+                            cur, self._apply_his_num)
+
+    def _apply_his_num(self, value):
+        hawk.put(hawk.HISTORY_NUM, value)
+        self._refresh_values()
+        self.status.configure(text=f"历史记录最多保留 {HIS_NUM_ARRAY[value]} 条，"
+                                   f"超出部分自动清理")
 
     def _toggle_home_page(self):
         cur = self._home_page()

@@ -1,7 +1,8 @@
 """播放页 PlayActivity 复刻：mpv 播放 + 选集/线路切换 + 进度显示 + 历史记录"""
+import threading
 import tkinter as tk
 
-from . import store
+from . import store, ui_thread
 from .theme import BG, FG, FG_DIM, FocusLabel, tv_font
 from .player import MpvPlayer
 
@@ -27,6 +28,7 @@ class Page(tk.Frame):
         self._speed = 1.0
         self._speeds = [1.0, 1.25, 1.5, 2.0, 0.5]
         self._app_binds = []
+        self._seq = 0  # 播放请求序号：后台解析返回时页面可能已切集/销毁
 
         # 顶部悬浮：返回 + 标题 + 选集面板开关
         bar = tk.Frame(self, bg="#000000")
@@ -82,21 +84,17 @@ class Page(tk.Frame):
         self.player = MpvPlayer(int(self.video.winfo_id()))
 
     def _resolve(self, url):
-        """type3 spider 站点：选集 id → 真实播放地址 + 请求头"""
+        """选集地址 → (真实媒体地址, 请求头)。含网络请求，须在后台线程调用"""
         from . import data_api, apiconfig
         bean = apiconfig.api_config.get(self.source_key)
         if bean:
             try:
-                real, hdr = data_api.get_play_url(bean, self.play_flag, url)
+                return data_api.get_play_url(bean, self.play_flag, url)
             except Exception as e:
-                real, hdr = url, None
-                self.status.configure(text=f"解析播放地址失败：{e}")
-            self._hdr = hdr
-            self._last_real = real
-            return real
-        self._hdr = None
-        self._last_real = url
-        return url
+                from .paths import log_error
+                log_error("[play] 解析播放地址失败", e)
+                return url, None
+        return url, None
 
     def _start(self, play_url):
         try:
@@ -104,15 +102,36 @@ class Page(tk.Frame):
         except OSError as e:
             self.status.configure(text=f"播放器初始化失败：{e}")
             return
-        real = self._resolve(play_url)
-        self.player.play(real, self._hdr)
+        # 解析含网络请求（分享页嗅探等），放后台线程，避免 UI 卡「没反应」
+        self._seq += 1
+        seq = self._seq
+        self.status.configure(text="正在获取播放信息...")
+        def work():
+            real, hdr = self._resolve(play_url)
+            ui_thread.run(lambda: self._do_play(real, hdr, seq, first=True))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _do_play(self, real, hdr, seq, first=False):
+        if seq != self._seq or self.player is None:
+            return  # 页面已切集/返回
+        self._hdr = hdr
+        self._last_real = real
+        self.player.apply_codec(self.player.mpv)
+        self.player.apply_scale(self.player.mpv)
+        self.player.play(real, hdr)
+        self.player.set_speed(self._speed)
         # 恢复进度（对应 Java getSavedProgress：按 progressKey=MD5(url) 精确 seek）
         prog = store.get_progress(real)
         if prog and prog.get("pos") and prog["pos"] > 5:
+            if self._seek_job:
+                try:
+                    self.after_cancel(self._seek_job)
+                except Exception:
+                    pass
             self._seek_job = self.after(1500, lambda: self.player.seek(prog["pos"]))
         self._poll_pos()
-        # 周期性保存进度（对应内核定期 saveProgress）
-        self._save_job = self.after(10000, self._auto_save)
+        if first:  # 周期性保存进度（对应内核定期 saveProgress）
+            self._save_job = self.after(10000, self._auto_save)
 
     def _auto_save(self):
         if not self.player or not self._last_real:
@@ -172,15 +191,13 @@ class Page(tk.Frame):
             if pos > 0:
                 store.save_progress(self._last_real, pos, dur or 0)
         self.ep_index = idx
-        real = self._resolve(url)
-        self.player.play(real, self._hdr)
-        self.player.set_speed(self._speed)
-        # 恢复该集上次进度（对应 getSavedProgress）
-        prog = store.get_progress(real)
-        if prog and prog.get("pos") and prog["pos"] > 5:
-            if self._seek_job:
-                self.after_cancel(self._seek_job)
-            self._seek_job = self.after(1500, lambda: self.player.seek(prog["pos"]))
+        self._seq += 1
+        seq = self._seq
+        self.status.configure(text="正在获取播放信息...")
+        def work():
+            real, hdr = self._resolve(url)
+            ui_thread.run(lambda: self._do_play(real, hdr, seq))
+        threading.Thread(target=work, daemon=True).start()
 
     def _back(self, _e=None):
         """返回详情页。UI 立即切换，mpv 停止与历史写库放到后台线程，

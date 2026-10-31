@@ -82,7 +82,23 @@ def save_record(source_key, vod_id, vod_name, play_tag, play_flag, play_ep,
                   (vod_id, vod_name, source_key, play_tag, play_flag, play_ep,
                    pos, duration, int(time.time()), data_json or "",
                    vod_pic or ""))
+        # 保留条数上限（对应原版 HISTORY_NUM：30/50/100 条，超出删最旧）
+        limit = _history_limit()
+        if limit:
+            c.execute("DELETE FROM vod_record WHERE rowid NOT IN ("
+                      "SELECT rowid FROM vod_record ORDER BY update_time DESC "
+                      "LIMIT %d)" % int(limit))
         c.commit()
+
+
+def _history_limit():
+    """历史记录上限（对应 HistoryHelper.hisNumArray {30,50,100}）"""
+    try:
+        from . import hawk
+        idx = int(hawk.get(hawk.HISTORY_NUM, 0))
+        return (30, 50, 100)[idx] if 0 <= idx < 3 else 0
+    except Exception:
+        return 0
 
 
 def get_record(source_key, vod_id):

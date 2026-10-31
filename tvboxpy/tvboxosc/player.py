@@ -48,6 +48,44 @@ class MpvPlayer:
                                   force_window="no", keep_open="yes")
             return cls._shared
 
+    # ---- 播放设置（对应原版 IJK_CODEC / PLAY_SCALE）----
+
+    @staticmethod
+    def apply_codec(core):
+        """解码方式：硬解码 → hwdec=auto，软解码 → hwdec=no"""
+        try:
+            from . import hawk
+            hard = hawk.get(hawk.IJK_CODEC, "硬解码") != "软解码"
+        except Exception:
+            hard = True
+        try:
+            core["hwdec"] = "auto" if hard else "no"
+        except Exception:
+            pass
+
+    @staticmethod
+    def apply_scale(core):
+        """画面缩放（对应 PlayerHelper.getScaleName / VideoView SCREEN_SCALE_*）"""
+        try:
+            from . import hawk
+            scale = int(hawk.get(hawk.PLAY_SCALE, 0))
+        except Exception:
+            scale = 0
+        try:
+            core["panscan"] = 0.0
+            core["video-unscaled"] = "no"
+            core["video-aspect-override"] = "no"
+            if scale == 1:      # 16:9
+                core["video-aspect-override"] = "16:9"
+            elif scale == 2:    # 4:3
+                core["video-aspect-override"] = "4:3"
+            elif scale == 3:    # 填充（保持比例裁剪铺满窗口）
+                core["panscan"] = 1.0
+            elif scale == 4:    # 原始（不缩放）
+                core["video-unscaled"] = "yes"
+        except Exception:
+            pass
+
     def play(self, url, headers=None):
         # 页面复用/核心重建后，确保拿到可用核心
         self.mpv = self._get_core(self._wid)

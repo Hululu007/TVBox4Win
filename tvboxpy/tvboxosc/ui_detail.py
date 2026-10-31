@@ -198,32 +198,55 @@ class Page(tk.Frame):
         self._resume_pos = rec.get("pos") or 0
         return (f_idx, ep_idx)
 
+    EP_CHUNK = 100  # 选集分批渲染：千集长剧一次性建全量按钮会卡死 UI（原版用 RecyclerView 懒加载）
+
     def _select_flag(self, idx, resume_ep=None):
         self.cur_flag = idx
-        for w in self.ep_area.winfo_children():
-            w.destroy()
-        names = self.info["series_flags"][idx][1]
-        urls = self.info["series_urls"][idx]
+        self._ep_names = self.info["series_flags"][idx][1]
+        self._ep_urls = self.info["series_urls"][idx]
+        self._resume_ep = None
         # 播放地址行（对应原版 tvPlayUrl）：显示当前选中集的真实地址
         try:
             sel = resume_ep if resume_ep is not None else 0
-            if urls and sel < len(urls):
+            if self._ep_urls and sel < len(self._ep_urls):
                 self.playurl_lbl.configure(
-                    text=f"播放地址：{urls[sel][:120]}")
+                    text=f"播放地址：{self._ep_urls[sel][:120]}")
         except Exception:
             pass
+        count = self.EP_CHUNK
+        if resume_ep is not None and resume_ep >= count:
+            count = (resume_ep // self.EP_CHUNK + 1) * self.EP_CHUNK
+        if resume_ep is not None and resume_ep < len(self._ep_names):
+            self._resume_ep = resume_ep
+        self._render_eps(count)
+
+    def _render_eps(self, count):
+        """渲染前 count 个选集按钮；未完则尾部挂「显示更多」"""
+        names, urls = self._ep_names, self._ep_urls
+        total = len(names)
+        for w in self.ep_area.winfo_children():
+            w.destroy()
+        end = min(total, max(count, self.EP_CHUNK))
         cols = 8
         btns = []
-        for i, (n, u) in enumerate(zip(names, urls)):
-            mark = " ▸" if resume_ep is not None and i == resume_ep else ""
-            b = FocusLabel(self.ep_area, text=(n[:14] + mark), bg=PANEL, fg=FG,
-                           font=tv_font(11), on_select=lambda uu=u, ii=i: self._play(ii, uu))
+        for i in range(end):
+            mark = " ▸" if self._resume_ep is not None and i == self._resume_ep else ""
+            b = FocusLabel(self.ep_area, text=(names[i][:14] + mark), bg=PANEL,
+                           fg=FG, font=tv_font(11),
+                           on_select=lambda uu=urls[i], ii=i: self._play(ii, uu))
             b.grid(row=i // cols, column=i % cols, padx=4, pady=4)
             btns.append(b)
+        if end < total:
+            mb = FocusLabel(self.ep_area,
+                            text=f"显示更多（{end}/{total}）", bg=PANEL, fg=FG_DIM,
+                            font=tv_font(11),
+                            on_select=lambda e=end: self._render_eps(e + 300))
+            mb.grid(row=end // cols, column=end % cols, padx=4, pady=4,
+                    sticky="w")
+            btns.append(mb)
         grid_key_nav(btns, cols)
-        if resume_ep is not None and resume_ep < len(btns):
-            btns[resume_ep].focus_set()
-            self._resume_ep = resume_ep
+        if self._resume_ep is not None and self._resume_ep < end:
+            btns[self._resume_ep].focus_set()
         elif btns:
             btns[0].focus_set()
 
