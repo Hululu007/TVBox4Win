@@ -1,8 +1,18 @@
 """主窗口 + 页面路由（对应 AppManager / HomeActivity 的页面切换）"""
+import os
+import sys
 import tkinter as tk
 from . import ui_thread, VERSION
 
 from .theme import BG
+
+
+def _icon_path():
+    """应用图标路径：冻结时资源在 _MEIPASS/tvboxosc/assets，开发时在模块旁 assets"""
+    base = getattr(sys, "_MEIPASS", None)
+    root = (os.path.join(base, "tvboxosc", "assets") if base
+            else os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets"))
+    return os.path.join(root, "tvbox4win.ico")
 
 
 class App(tk.Tk):
@@ -12,6 +22,12 @@ class App(tk.Tk):
         self.title(f"TVBox4Win v{VERSION}")
         self.geometry("1280x720")
         self.configure(bg=BG)
+        _ico = _icon_path()
+        if os.path.exists(_ico):
+            try:
+                self.iconbitmap(_ico)
+            except Exception:
+                pass
         self.container = tk.Frame(self, bg=BG)
         self.container.pack(fill="both", expand=True)
         self.current = None

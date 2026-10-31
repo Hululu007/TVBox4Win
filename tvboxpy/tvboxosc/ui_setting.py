@@ -120,7 +120,7 @@ class Page(tk.Frame):
         self._set_value("历史上限",
                         f"{HIS_NUM_ARRAY[hn]} 条" if 0 <= hn < 3 else "30 条")
         self._set_value("下次进入", "直播" if self._home_page() == "live" else "点播")
-        self._set_value("关于", "tvboxpy 1.0")
+        self._set_value("关于", f"v{VERSION}")
 
     @staticmethod
     def _short(url, n=44):
