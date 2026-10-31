@@ -1,9 +1,20 @@
 # tvboxpy — TVBox Windows 桌面复刻（Python 版）
 
+当前版本：**v0.9.1**（版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox2EXE/releases) 下载）
+
 把安卓 TV 上流行的影视聚合播放器 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 复刻到 Windows 桌面：
 **Python 3 + tkinter + libmpv** 实现，单文件 EXE 即可运行，UI 与交互按原版逐页对齐。
 
 > 本项目仅供学习交流，请勿用于商业用途。影片数据均来自用户自行配置的第三方接口，与本项目无关。
+
+## 📥 免安装下载（推荐）
+
+不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox2EXE/releases/latest) 下载 `tvboxpy-v0.9.1-win64.zip`：
+
+1. 解压到任意可写目录
+2. 双击 `tvboxpy.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
+3. CMS 类站点开箱即用；JS 站点需本机有 Node.js，Jar 站点需 JDK 17+（资产已附带）
+4. 首次运行如遇 SmartScreen 拦截，点「更多信息 → 仍要运行」
 
 ---
 
