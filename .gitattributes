@@ -1,0 +1,5 @@
+# GitHub 语言统计：reference/ 为原版安卓项目参考副本，不计入本项目语言构成
+reference/** linguist-vendored
+
+# 测试脚本不计入
+tvboxpy/tests/** linguist-vendored
