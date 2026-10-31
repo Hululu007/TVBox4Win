@@ -1,38 +1,56 @@
 # tvboxpy — TVBox 复刻（Python 版）
 
-Python + tkinter + libmpv 复刻 TVBox 核心功能，比 C 版开发快一个数量级。
+用 **Python 3 + tkinter + libmpv** 在 Windows 桌面上复刻 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC)（安卓 TV 端影视聚合播放器）的核心功能：
+
+- **接口配置加载**：兼容 TVBox 各类配置（纯 JSON / 带 BOM / 文本内嵌 JSON），站点、直播、解析、spider 全解析
+- **首页推荐**：豆瓣热播 / 站点推荐 / 观看历史 三模式切换（对应原版 HawkConfig.HOME_REC）
+- **分类浏览**：站点 → 分类 → 影片网格（海报异步加载、豆瓣镜像兜底、优先级调度）
+- **搜索**：复刻原版 FastSearchActivity——多站点并发、实时状态、分词 chips 换词重搜
+- **详情页**：影片信息 chips、多线路多选集（千集长剧分批渲染）、播放地址展示、收藏/快速搜索
+- **播放**：libmpv 全屏沉浸式播放，复刻原版控制栏（暂停/上下集/重播/倍速/进度条拖拽/音量/选集，4 秒无操作自动隐藏），断点续播、自动连播
+- **设置**：解码方式（硬解/软解）、画面缩放、历史上限、首页站源、清空缓存等
+- **爬虫运行时**：type 0/1 CMS 接口、type 3 的 JS/Py/Jar spider（quickjs 运行时 + dex2jar 桥）
+
+## 目录结构
+
+```
+tvboxpy/
+├── main.py              # 入口
+├── tvboxosc/            # 应用源码（UI / 数据 / 播放 / 爬虫）
+│   ├── app.py           # 主窗口与页面路由
+│   ├── ui_*.py          # 主页/搜索/详情/播放/设置/收藏/直播等页面
+│   ├── player.py        # libmpv 封装（预热、复用、断点续播）
+│   ├── data_api.py      # CMS 接口 + 播放地址解析/嗅探
+│   ├── spider.py        # spider 分发（js/py/jar）
+│   ├── spider_runtime/  # 内置 quickjs JS 爬虫运行时（drpy 同款）
+│   ├── jar_spider.py    # jar spider：dex→jar 转换 + JVM 桥
+│   ├── apiconfig.py     # 接口配置解析
+│   ├── store.py / hawk.py  # 观看历史(SQLite) / 配置存储
+│   └── theme.py / imgcache.py  # 主题与海报缓存
+├── third_party/mpv/     # libmpv 开发库（dll 不入库，见下）
+├── tests/               # 自动化验证脚本（EXE 像素级 UI 测试）
+├── build_exe.py         # PyInstaller 打包脚本
+└── tvboxpy.spec
+```
 
 ## 运行
 
+依赖：Python 3.10+，`pip install requests python-mpv`，以及 [libmpv](https://github.com/shinchiro/mpv-winbuild-cmake/releases) 的 `libmpv-2.dll`（放入 `third_party/mpv/`，`include/` 头文件已随仓库提供）。
+
 ```
-C:/Users/Administrator/.workbuddy/binaries/python/envs/default/Scripts/python tvboxpy.py
-# 或指定接口
-python tvboxpy.py https://dxawi.github.io/0/0.json
+python main.py                # 使用内置默认接口
+python main.py <配置URL或本地json路径>
 ```
-
-依赖：requests、python-mpv（已装入 venv）；libmpv-2.dll 在 `third_party/mpv/`。
-
-## 已实现
-
-- 接口配置加载（兼容非纯 JSON 文本、缓存到 tvbox.json）
-- 站点 → 分类 → 影片 → 剧集 → libmpv 播放（嵌入窗口，Esc 停止返回）
-- 关键词搜索
-- type 0/1（CMS API，含 JSON/股票 xml 接口实际返回 JSON 的源）
-
-## 未实现（后续）
-
-- type 3（csp/Spider）站点 —— 现代配置的主流。方案：用 quickjs pip 包跑 JS 爬虫
-  （spider 接口：init/home/homeVodSet/category/detail/search/playerContent），
-  编译版 csp jar 无法直接跑
-- 直播 (lives)、解析 (parses)、历史收藏
 
 ## 打包 EXE
 
 ```
-pyinstaller --onefile --windowed --add-binary "third_party/mpv/libmpv-2.dll;." tvboxpy.py
+python build_exe.py           # 产物在 dist/tvboxpy.exe
 ```
 
-## 默认接口
+jar spider 站点运行还需将 `jvmrt/`（JVM 桥运行时）与 `dex-tools-v2.4/` 放到 exe 同目录。
 
-`https://dxawi.github.io/0/0.json`（48 站点，其中 3 个 type1 可用：
-暴风/IK/海外看；其余 type3 需 spider 运行时）
+## 说明
+
+- `reference/`（仓库根目录）内为学习对齐 UI/交互所参照的原版安卓源码（TVBoxOSC fork），版权归原项目所有，不参与本项目构建。
+- 本项目仅供学习交流，请勿用于商业用途；影视数据均来自第三方接口，与本项目无关。

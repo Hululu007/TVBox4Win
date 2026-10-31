@@ -1,81 +1,43 @@
 # ============================================================
-#  tvbox2exe / tvboxpy 本地仓库忽略规则
+#  tvboxpy 本地仓库忽略规则
 # ============================================================
 
 # ---------- 构建产物 ----------
 build/
 dist/
-tvbox2exe/build/
-tvboxpy/build/
-tvboxpy/dist/
 **/__pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.spec.bak
-*.o
-*.obj
-*.pdb
-*.ilk
 
-# ---------- 运行期缓存 ----------
-.imgcache/
-tvboxpy/.imgcache/
-.jar_cache/
-tvboxpy/.jar_cache/
-.spider_cache/
-tvboxpy/.spider_cache/
-*.log
-
-# ---------- 大型二进制/第三方依赖 ----------
-*.exe
+# ---------- 第三方二进制（libmpv 等不入库，下载方式见 tvboxpy/README.md）----------
 *.dll
 *.so
 *.so.*
 *.a
 *.lib
 *.dylib
+*.exe
 *.apk
-*.aar
 *.jar
 *.7z
 *.zip
-*.mp4
-*.mkv
-third_party/mpv/
-tvboxpy/third_party/mpv/
-tvbox2exe/third_party/mpv/
-app/libs/
 
-# ---------- 运行期数据库/状态 ----------
+# ---------- 运行期缓存 / 状态 / 用户配置 ----------
+.imgcache/
+.jar_cache/
+.spider_cache/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+*.log
+hawk.json
 
-# ---------- 截图与临时排查产物 ----------
-/shot*.png
-/t_*.png
-/s_*.png
-/tvboxpy/t_*.png
-/tvboxpy/t_*.txt
-/tvboxpy/t_try.mp4
-/tvboxpy/屏幕截图*.png
-/sim*.log
-/javac.log
-/detail_dbg.log
-/search_dbg.log
-/posters_dbg*.log
+# ---------- 参考工程（reference/）中的二进制资产 ----------
+reference/app/libs/
 
-# ---------- 上游参考工程（各自独立，不纳入本仓库）----------
-# 必须加前导 / 锚定根目录：Windows 大小写不敏感，
-# 裸写 TVBoxOSC/ 会连 tvboxpy/tvboxosc/（本工程源码）一起忽略
-/TVBoxOSC/
-/tvboxosc-python/
-
-# ---------- 智能体工作目录 ----------
+# ---------- 智能体工作目录 / 系统 ----------
 .workbuddy/
-
-# ---------- 系统/编辑器 ----------
 Thumbs.db
 desktop.ini
 .DS_Store
