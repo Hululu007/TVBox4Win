@@ -57,6 +57,17 @@ def main():
 
     app = App()
 
+    # 预热 mpv 核心：DLL 加载 + 核心 init 是首次点播放 1~2 秒的固定开销，
+    # 启动时后台做掉，用户点播放即可立即起播（原版 ijk 内核随进程初始化）
+    def _warmup():
+        try:
+            from tvboxosc.player import MpvPlayer
+            MpvPlayer.warmup()
+        except Exception:
+            pass
+    import threading
+    threading.Thread(target=_warmup, daemon=True).start()
+
     loading = tk.Label(app.container, text="TVBox\n正在加载接口配置...",
                        bg="#000000", fg="#FFFFFF", font=("Microsoft YaHei UI", 18))
     loading.pack(fill="both", expand=True)

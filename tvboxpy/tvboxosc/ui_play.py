@@ -1,10 +1,15 @@
 """播放页 PlayActivity 复刻：mpv 播放 + 选集/线路切换 + 进度显示 + 历史记录"""
+import os
+import time
 import threading
 import tkinter as tk
 
 from . import store, ui_thread
-from .theme import BG, FG, FG_DIM, FocusLabel, tv_font
+from .theme import ACCENT, BG, FG, FG_DIM, FocusLabel, tv_font
 from .player import MpvPlayer
+
+CHROME_BG = "#0B0F1C"   # 控制栏底色（近黑，覆在视频上）
+BTN_BG = "#26325C"      # 按钮底色（theme.PANEL_HI）
 
 
 class Page(tk.Frame):
@@ -30,6 +35,9 @@ class Page(tk.Frame):
         self._app_binds = []
         self._seq = 0  # 播放请求序号：后台解析返回时页面可能已切集/销毁
         self._hide_job = None
+        self._cur_pos = 0.0
+        self._dur = 0.0
+        self._t_start = None  # 起播计时（TVBOXPY_DEBUG 时打印）
 
         # 全屏沉浸播放（对应原版 PlayActivity 全屏）：进入播放页自动全屏，
         # 返回时恢复之前的窗口状态
@@ -40,21 +48,27 @@ class Page(tk.Frame):
         except Exception:
             pass
 
-        # 视频区域铺满整页；控制栏/状态栏悬浮其上（自动隐藏）
+        # 视频区域铺满整页；控制栏悬浮其上（自动隐藏）
         self.video = tk.Frame(self, bg="#000000", highlightthickness=0)
         self.video.place(x=0, y=0, relwidth=1.0, relheight=1.0)
         self.video.configure(width=100, height=100)
 
-        bar = tk.Frame(self, bg="#000000")
-        bar.place(x=0, y=0, relwidth=1.0)
-        self.bar = bar
-        self._bar_widgets(bar)
-        bar.lift()  # bar 与 video 重叠，必须保持在 mpv 之上
+        # 顶部信息栏（对应原版 tv_info_name1：片名 · 线路 · 集名）
+        self.top = tk.Frame(self, bg=CHROME_BG)
+        self.top.place(x=0, y=0, relwidth=1.0, height=42)
+        self._top_widgets(self.top)
+        self.top.lift()  # 与 video 重叠，必须保持在 mpv 之上
 
-        # 底部状态：进度 + 集名
+        # 底部控制栏（对应原版 bottom_container：按钮行 + 进度行）
+        self.bottom = tk.Frame(self, bg=CHROME_BG)
+        self.bottom.place(x=0, rely=1.0, relwidth=1.0, height=96, anchor="sw")
+        self._bottom_widgets(self.bottom)
+        self.bottom.lift()
+
+        # 中下部提示（「正在获取播放信息...」等），不随控制栏隐藏
         self.status = tk.Label(self, text="", bg="#000000", fg=FG_DIM,
-                               font=tv_font(11))
-        self.status.place(x=16, rely=0.94)
+                               font=tv_font(12))
+        self.status.place(relx=0.5, rely=0.86, anchor="center")
 
         # 沉浸式控制栏：无操作 4 秒后隐藏，鼠标移动/按键/点击唤出
         for seq in ("<Motion>", "<Any-KeyPress>", "<Button-1>"):
@@ -64,6 +78,25 @@ class Page(tk.Frame):
             except Exception:
                 pass
         self._show_chrome()
+
+        # 播放快捷键（对应原版遥控器/键盘操作）
+        hotkeys = {
+            "<space>": self._toggle_pause,      # 播放/暂停
+            "<Left>": lambda: self._seek_rel(-10),
+            "<Right>": lambda: self._seek_rel(10),
+            "<Up>": lambda: self._volume_rel(5),
+            "<Down>": lambda: self._volume_rel(-5),
+            "<Prior>": self._prev_ep,           # PageUp 上一集
+            "<Next>": self._next_ep,            # PageDown 下一集
+            "<Key-f>": self._toggle_fullscreen,
+            "<Key-F>": self._toggle_fullscreen,
+        }
+        for seq, cb in hotkeys.items():
+            try:
+                fid = self.app.bind(seq, lambda e, c=cb: (c(), "break")[1], add="+")
+                self._app_binds.append((seq, fid))
+            except Exception:
+                pass
 
         # Esc / BackSpace 也能返回（绑在顶层窗口，播放时焦点常在 mpv 子窗口，
         # 绑在本 Frame 上收不到按键）
@@ -76,23 +109,118 @@ class Page(tk.Frame):
         self.focus_set()
         self.after(200, lambda: self._start(play_url))
 
-    def _bar_widgets(self, bar):
-        FocusLabel(bar, text="← 返回", font=tv_font(12, True),
-                   on_select=self._back).pack(side="left", padx=12, pady=6)
-        tk.Label(bar, text=f"{self.vod_name} · {self.play_flag} · "
-                 f"{self.series[0][1][self.ep_index] if self.series else ''}",
-                 bg="#000000", fg=FG, font=tv_font(13, True)).pack(side="left", padx=10)
+    # ---- 控制栏构建（复刻原版 player_vod_control_view.xml） ----
+
+    def _mk_btn(self, parent, text, cb, accent=False, side="left"):
+        w = FocusLabel(parent, text=text, font=tv_font(12),
+                       bg=ACCENT if accent else BTN_BG, fg="#FFFFFF",
+                       on_select=cb, padx=14, pady=5)
+        w.pack(side=side, padx=4)
+        return w
+
+    def _top_widgets(self, top):
+        FocusLabel(top, text="← 返回", font=tv_font(12, True), bg=BTN_BG,
+                   fg="#FFFFFF", on_select=self._back,
+                   padx=12, pady=5).pack(side="left", padx=(12, 8), pady=7)
+        self.info_lbl = tk.Label(
+            top, text=f"{self.vod_name} · {self.play_flag} · "
+                      f"{self.series[0][1][self.ep_index] if self.series else ''}",
+            bg=CHROME_BG, fg=FG, font=tv_font(12, True))
+        self.info_lbl.pack(side="left")
+
+    def _bottom_widgets(self, b):
+        row = tk.Frame(b, bg=CHROME_BG)
+        row.pack(fill="x", padx=12, pady=(8, 4))
+        self.play_btn = self._mk_btn(row, "⏸ 暂停", self._toggle_pause)
+        self._mk_btn(row, "⏮ 上一集", self._prev_ep)
+        self._mk_btn(row, "⏭ 下一集", self._next_ep)
+        self._mk_btn(row, "↻ 重播", self._replay)
+        self._mk_btn(row, "⛶ 窗口/全屏", self._toggle_fullscreen)
+        self.vol_lbl = tk.Label(row, text="🔊 100", bg=CHROME_BG, fg=FG_DIM,
+                                font=tv_font(11))
+        self.vol_lbl.pack(side="left", padx=(12, 0))
+
         if self.series:
-            FocusLabel(bar, text="选集", font=tv_font(12),
-                       on_select=self._show_series).pack(side="right", padx=12)
-        self.speed_btn = FocusLabel(bar, text="倍速 1.0x", font=tv_font(12),
-                                    on_select=self._cycle_speed)
-        self.speed_btn.pack(side="right", padx=12)
+            self._mk_btn(row, "选集", self._show_series, side="right")
+        self.speed_btn = FocusLabel(row, text="倍速 1.0x", font=tv_font(12),
+                                    bg=BTN_BG, fg="#FFFFFF",
+                                    on_select=self._cycle_speed, padx=14, pady=5)
+        self.speed_btn.pack(side="right", padx=4)
+
+        # 进度行：当前时间 | 进度条 | 总时长（对应 curr_time / seekBar / total_time）
+        prow = tk.Frame(b, bg=CHROME_BG)
+        prow.pack(fill="x", padx=14, pady=(0, 8))
+        self.cur_lbl = tk.Label(prow, text="00:00", bg=CHROME_BG, fg=FG,
+                                font=tv_font(11), width=7, anchor="e")
+        self.cur_lbl.pack(side="left")
+        self.seek = tk.Canvas(prow, bg=CHROME_BG, height=18,
+                              highlightthickness=0)
+        self.seek.pack(side="left", fill="x", expand=1, padx=10)
+        self.tot_lbl = tk.Label(prow, text="00:00", bg=CHROME_BG, fg=FG_DIM,
+                                font=tv_font(11), width=7, anchor="w")
+        self.tot_lbl.pack(side="left")
+
+        self._seeking = False
+        self._seek_preview = 0.0
+        self.seek.bind("<Button-1>", self._seek_click)
+        self.seek.bind("<B1-Motion>", self._seek_drag)
+        self.seek.bind("<ButtonRelease-1>", self._seek_release)
+        self.seek.bind("<Configure>", lambda e: self._draw_seek(
+            self._seek_preview if self._seeking else self._cur_pos, self._dur))
+
+    def _draw_seek(self, pos, dur):
+        """绘制进度条（已播放橙色 + 圆点 thumb），对应 shape_player_control_vod_seek"""
+        c = self.seek
+        w = max(c.winfo_width(), 10)
+        cy, hh = 9, 3
+        ratio = 0.0 if not dur else max(0.0, min(1.0, pos / dur))
+        x = int(w * ratio)
+        c.delete("all")
+        c.create_rectangle(0, cy - hh, w, cy + hh, fill="#39415C", outline="")
+        if x > 0:
+            c.create_rectangle(0, cy - hh, x, cy + hh, fill=ACCENT, outline="")
+        c.create_oval(x - 6, cy - 6, x + 6, cy + 6, fill=ACCENT, outline="")
+
+    def _seek_to_event(self, e):
+        w = max(self.seek.winfo_width(), 10)
+        ratio = max(0.0, min(1.0, e.x / w))
+        return ratio * (self._dur or 0)
+
+    def _seek_click(self, e):
+        if not self._dur:
+            return "break"
+        self._seeking = True
+        self._seek_preview = self._seek_to_event(e)
+        self.cur_lbl.configure(text=self._fmt(self._seek_preview))
+        self._draw_seek(self._seek_preview, self._dur)
+        self._show_chrome()
+        return "break"
+
+    def _seek_drag(self, e):
+        if not self._seeking:
+            return "break"
+        self._seek_preview = self._seek_to_event(e)
+        self.cur_lbl.configure(text=self._fmt(self._seek_preview))
+        self._draw_seek(self._seek_preview, self._dur)
+        return "break"
+
+    def _seek_release(self, e):
+        if not self._seeking:
+            return "break"
+        self._seeking = False
+        pos = self._seek_to_event(e)
+        if self.player and pos:
+            self.player.seek(pos)
+            self._cur_pos = pos
+        self._show_chrome()
+        return "break"
 
     def _show_chrome(self, _e=None):
         """唤出控制栏并重置自动隐藏计时（沉浸式，对应原版触摸唤出控制栏）"""
-        self.bar.place(x=0, y=0, relwidth=1.0)
-        self.status.place(x=16, rely=0.94)
+        self.top.place(x=0, y=0, relwidth=1.0, height=42)
+        self.bottom.place(x=0, rely=1.0, relwidth=1.0, height=96, anchor="sw")
+        self.top.lift()
+        self.bottom.lift()
         if self._hide_job:
             try:
                 self.after_cancel(self._hide_job)
@@ -102,8 +230,72 @@ class Page(tk.Frame):
 
     def _hide_chrome(self):
         self._hide_job = None
-        self.bar.place_forget()
-        self.status.place_forget()
+        if self._seeking:  # 拖动进度条时不隐藏
+            self._hide_job = self.after(2000, self._hide_chrome)
+            return
+        self.top.place_forget()
+        self.bottom.place_forget()
+
+    # ---- 播放控制（对应原版 play_label / play_next / play_pre / seekBar） ----
+
+    def _toggle_pause(self):
+        if not self.player:
+            return
+        paused = self.player.toggle_pause()
+        self.play_btn.configure(text="▶ 播放" if paused else "⏸ 暂停")
+        if paused:
+            self.status.configure(text="已暂停")
+        else:
+            self.status.configure(text="")
+        self._show_chrome()
+
+    def _prev_ep(self):
+        if not self.series or self.ep_index <= 0:
+            self.status.configure(text="已经是第一集")
+            self.after(1500, lambda: self.status.configure(text=""))
+            return
+        idx = self.ep_index - 1
+        self._switch_ep(idx, self.series[1][idx])
+
+    def _next_ep(self):
+        if not self.series or self.ep_index >= len(self.series[1]) - 1:
+            self.status.configure(text="已经是最后一集")
+            self.after(1500, lambda: self.status.configure(text=""))
+            return
+        idx = self.ep_index + 1
+        self._switch_ep(idx, self.series[1][idx])
+
+    def _replay(self):
+        if self.player:
+            self.player.seek(0)
+            self.player.set_pause(False)
+            self.play_btn.configure(text="⏸ 暂停")
+        self._show_chrome()
+
+    def _toggle_fullscreen(self):
+        try:
+            self.app.attributes("-fullscreen",
+                                not self.app.attributes("fullscreen"))
+        except Exception:
+            pass
+        self._show_chrome()
+
+    def _seek_rel(self, delta):
+        if not self.player:
+            return
+        pos, dur, _ = self.player.status()
+        target = max(0.0, min((dur or 0) - 1, (pos or 0) + delta))
+        self.player.seek(target)
+        self.status.configure(text=f"{'+' if delta > 0 else ''}{delta} 秒")
+        self.after(1200, lambda: self.status.configure(text=""))
+        self._show_chrome()
+
+    def _volume_rel(self, delta):
+        if not self.player:
+            return
+        vol = max(0, min(150, self.player.get_volume() + delta))
+        self.player.set_volume(vol)
+        self.vol_lbl.configure(text=f"🔊 {vol}")
 
     def _cycle_speed(self):
         """倍速循环（对应 resetSpeed 面板）"""
@@ -134,6 +326,7 @@ class Page(tk.Frame):
         return url, None
 
     def _start(self, play_url):
+        self._t_start = time.time()
         try:
             self._ensure_player()
         except OSError as e:
@@ -194,10 +387,21 @@ class Page(tk.Frame):
                 return
             self.status.configure(text="全部播放完毕")
             return
-        flag = " ⏸" if pause else ""
-        spd = f" {self._speed}x" if self._speed != 1.0 else ""
-        self.status.configure(
-            text=f"{self._fmt(pos)} / {self._fmt(dur)}{flag}{spd}")
+        # 刷新进度条与时间（对应原版 seekBar / curr_time / total_time）
+        self._cur_pos, self._dur = pos or 0, dur or 0
+        self.cur_lbl.configure(text=self._fmt(self._cur_pos))
+        self.tot_lbl.configure(text=self._fmt(self._dur))
+        if not self._seeking:
+            self._draw_seek(self._cur_pos, self._dur)
+        self.play_btn.configure(text="▶ 播放" if pause else "⏸ 暂停")
+        # 起播后清掉「正在获取播放信息」提示
+        if self._cur_pos > 0.5 and self.status.cget("text") == "正在获取播放信息...":
+            self.status.configure(text="")
+        if self._t_start and self._cur_pos > 0.5:
+            if os.environ.get("TVBOXPY_DEBUG"):
+                print("[startup] click->first frame: %.1fs"
+                      % (time.time() - self._t_start), flush=True)
+            self._t_start = None
         self._pos_job = self.after(1000, self._poll_pos)
 
     @staticmethod
@@ -232,6 +436,13 @@ class Page(tk.Frame):
             if pos > 0:
                 store.save_progress(self._last_real, pos, dur or 0)
         self.ep_index = idx
+        # 顶部信息栏跟着切集更新（对应原版 tv_info_name1）
+        try:
+            self.info_lbl.configure(
+                text=f"{self.vod_name} · {self.play_flag} · "
+                     f"{self.series[0][1][idx] if self.series else ''}")
+        except Exception:
+            pass
         self._seq += 1
         seq = self._seq
         self.status.configure(text="正在获取播放信息...")

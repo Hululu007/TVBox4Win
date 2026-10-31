@@ -27,6 +27,16 @@ class MpvPlayer:
         self._last_url = None
 
     @classmethod
+    def warmup(cls):
+        """预热 mpv 核心（启动时后台调用）：DLL 加载 + 核心 init 是首次点播放
+        时 1~2 秒的固定开销，提前做掉，点击即可立即 loadfile"""
+        try:
+            cls._get_core(0)
+            return True
+        except Exception:
+            return False
+
+    @classmethod
     def _get_core(cls, wid):
         """复用现有核心；核心已 shutdown 则重建。切换嵌入窗口用运行时改 wid"""
         with cls._core_lock:
@@ -44,8 +54,12 @@ class MpvPlayer:
                     except Exception:
                         pass
                     cls._shared = None
-            cls._shared = mpv.MPV(wid=str(wid), osc="yes",
-                                  force_window="no", keep_open="yes")
+            # osc=no：播放页自带控制栏（原版 bottom_container），避免双进度条
+            # network_timeout：网络流挂死保护；实测 cache=yes 反而拖慢起播
+            # （mpv 默认 cache 策略最快），故不加
+            cls._shared = mpv.MPV(wid=str(wid), osc="no",
+                                  force_window="no", keep_open="yes",
+                                  network_timeout=8)
             return cls._shared
 
     # ---- 播放设置（对应原版 IJK_CODEC / PLAY_SCALE）----
@@ -98,29 +112,68 @@ class MpvPlayer:
         except Exception:  # mpv 会抛 MPVError/ShutdownError，不止 RuntimeError
             pass
         try:
-            self.mpv.command("loadfile", url)
+            self.mpv.command("loadfile", url, "replace")
         except Exception:  # 含 mpv.ShutdownError
             return
-        # mpv 核心刚创建时首条 loadfile 可能被静默丢弃，循环重试直到开始播放；
-        # 若音频输出设备故障导致始终播不起来，自动降级 ao=null（无声）保证画面正常
+        # 后台看护：只有在确实回到 idle（首条 loadfile 被丢弃或打开失败）时才重试。
+        # 原先每 0.5 秒检查一次并重复 loadfile，会打断正在打开的流 → 起播反而变慢；
+        # 现改为 2 秒一轮，且非 idle 立即退出。
         def _ensure():
             import time
-            retried = False
-            for _ in range(20):
-                time.sleep(0.5)
+            for i in range(8):
+                time.sleep(2)
                 try:
                     if self._last_url != url:
                         return  # 已切到别的文件
-                    if self.mpv.idle_active:
-                        self.mpv.command("loadfile", url)
-                        if _ >= 5 and not retried:
-                            retried = True
-                            self.mpv["ao"] = "null"  # 降级：无声播放
-                    else:
-                        return
+                    if not self.mpv.idle_active:
+                        return  # 已进入加载/播放
+                    self.mpv.command("loadfile", url, "replace")
+                    if i >= 2:
+                        self.mpv["ao"] = "null"  # 音频设备故障兜底：无声播放
                 except Exception:  # 含 mpv.ShutdownError
                     return
         threading.Thread(target=_ensure, daemon=True).start()
+
+    # ---- 播放控制（对应原版 play_label / seekBar / 音量） ----
+
+    def paused(self):
+        try:
+            return bool(self.mpv.pause)
+        except Exception:
+            return False
+
+    def toggle_pause(self):
+        """播放/暂停切换，返回切换后的暂停状态"""
+        try:
+            self.mpv.pause = not bool(self.mpv.pause)
+            return bool(self.mpv.pause)
+        except Exception:
+            return False
+
+    def set_pause(self, val):
+        try:
+            self.mpv.pause = bool(val)
+        except Exception:
+            pass
+
+    def get_volume(self):
+        try:
+            return int(self.mpv.volume)
+        except Exception:
+            return 100
+
+    def set_volume(self, vol):
+        try:
+            self.mpv.volume = max(0, min(150, int(vol)))
+        except Exception:
+            pass
+
+    def core_idle(self):
+        """True 表示尚未出画面（用于起播计时/诊断）"""
+        try:
+            return bool(self.mpv.core_idle)
+        except Exception:
+            return True
 
     def status(self):
         try:
