@@ -3,3 +3,6 @@ reference/** linguist-vendored
 
 # 测试脚本不计入
 tvboxpy/tests/** linguist-vendored
+
+# spider 运行时的内置 JS 依赖库（cheerio/crypto-js/drpy 等），非项目主体代码
+tvboxpy/tvboxosc/spider_runtime/*.js linguist-vendored
