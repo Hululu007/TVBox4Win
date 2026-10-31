@@ -383,7 +383,7 @@ class Page(tk.Frame):
                 imgcache.drop(k)
                 return
             try:
-                photo = tk.PhotoImage(file=path)
+                photo = imgcache.fit_photo(tk.PhotoImage(file=path))
             except tk.TclError:
                 return
             imgcache.keep(k, photo)

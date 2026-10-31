@@ -1,7 +1,7 @@
 """设置页 SettingActivity 复刻（布局对照原版截图：网格卡片，每项
 「标签 + 当前值 ›」，2 列排布，方向键移动焦点）
 
-卡片项：配置地址 / 配置历史 / 首页站源 / 下次进入 / 清空缓存 / 关于
+卡片项：配置地址 / 配置历史 / 首页站源 / 首页推荐 / 下次进入 / 清空缓存 / 关于
 """
 import os
 import shutil
@@ -13,6 +13,9 @@ from .theme import (BG, FG, FG_DIM, ACCENT, FOCUS_BG, FOCUS_FG,
                     FocusLabel, tv_font, PANEL)
 
 DEFAULT_API = "https://cyao2q.github.io/files/m.json"
+
+# 首页推荐（对应 HawkConfig.HOME_REC：0 豆瓣热播 / 1 站点推荐 / 2 观看历史）
+HOME_REC_NAMES = {0: "豆瓣热播", 1: "站点推荐", 2: "观看历史"}
 
 
 class Page(tk.Frame):
@@ -44,6 +47,7 @@ class Page(tk.Frame):
         self._add_card(grid, "配置地址", full=True, cb=self._edit_api)
         self._add_card(grid, "配置历史", full=True, cb=self._pick_hist)
         self._add_card(grid, "首页站源", cb=self._goto_grid)
+        self._add_card(grid, "首页推荐", cb=self._pick_home_rec)
         self._add_card(grid, "下次进入", cb=self._toggle_home_page)
         self._add_card(grid, "清空缓存", cb=self._clear_cache)
         self._add_card(grid, "关于", cb=self._show_about)
@@ -90,6 +94,8 @@ class Page(tk.Frame):
         hist = hawk.get(hawk.API_HISTORY, []) or []
         self._set_value("配置历史", f"{len(hist)} 条" if hist else "")
         self._set_value("首页站源", self._home_source_name())
+        self._set_value("首页推荐", HOME_REC_NAMES.get(self._home_rec(),
+                                                       HOME_REC_NAMES[1]))
         self._set_value("下次进入", "直播" if self._home_page() == "live" else "点播")
         self._set_value("关于", "tvboxpy 1.0")
 
@@ -106,6 +112,14 @@ class Page(tk.Frame):
     @staticmethod
     def _home_page():
         return hawk.get("home_page", "vod") or "vod"
+
+    @staticmethod
+    def _home_rec():
+        """首页推荐类型：0 豆瓣热播 / 1 站点推荐 / 2 观看历史"""
+        try:
+            return int(hawk.get(hawk.HOME_REC, hawk.DEFAULT_HOME_REC))
+        except (TypeError, ValueError):
+            return hawk.DEFAULT_HOME_REC
 
     # ------------------------------------------------ 功能动作 ----
     def _edit_api(self):
@@ -143,6 +157,21 @@ class Page(tk.Frame):
         # 首页站源在主页「切换源」里管理，此处快捷进入点播页
         from .ui_grid import Page as GridPage
         self.app.switch(GridPage)
+
+    def _pick_home_rec(self):
+        """首页推荐选择（对应 ModelSettingFragment llHomeRec → SelectDialog）"""
+        cur = self._home_rec()
+        self._select_dialog("请选择首页列表数据",
+                            [(v, HOME_REC_NAMES[v]) for v in (0, 1, 2)],
+                            cur, self._apply_home_rec)
+
+    def _apply_home_rec(self, value):
+        hawk.put(hawk.HOME_REC, value)
+        self._refresh_values()
+        self.status.configure(text=f"首页推荐已切换为「{HOME_REC_NAMES[value]}」，"
+                                   f"返回主页即可看到效果")
+        # 立刻回主页让用户看到效果（对应原版 Hawk 改动后首页重刷）
+        self.after(260, self.app.go_home)
 
     def _toggle_home_page(self):
         cur = self._home_page()
@@ -222,6 +251,38 @@ class Page(tk.Frame):
                 on_pick(box.get(sel[0]))
         box.bind("<Return>", pick)
         box.bind("<Double-Button-1>", pick)
+        win.bind("<Escape>", lambda e: win.destroy())
+
+    def _select_dialog(self, tip, options, current, on_pick):
+        """单选弹窗（对应 SelectDialog：竖排选项，当前项高亮，方向键选择）"""
+        win = tk.Toplevel(self)
+        win.title(tip)
+        win.configure(bg=BG)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        tk.Label(win, text=tip, bg=BG, fg=FG, font=tv_font(14, True)
+                 ).pack(padx=26, pady=(16, 8), anchor="w")
+        box = tk.Frame(win, bg=BG)
+        box.pack(fill="both", expand=True, padx=26, pady=(0, 16))
+        btns = []
+        focus_first = None
+        for val, name in options:
+            on = val == current
+            b = FocusLabel(box, text=("● " if on else "　") + name,
+                           bg=ACCENT if on else PANEL,
+                           fg="#FFFFFF" if on else FG, font=tv_font(13, on),
+                           padx=18, pady=10, anchor="w",
+                           on_select=lambda v=val: (win.destroy(), on_pick(v)))
+            b.pack(fill="x", pady=4)
+            btns.append(b)
+            if on and focus_first is None:
+                focus_first = b
+        if focus_first is not None:  # 焦点停在当前选中项（对应原版 defaultPos）
+            focus_first.focus_set()
+        elif btns:
+            btns[0].focus_set()
+        from .theme import grid_key_nav
+        grid_key_nav(btns, 1, up_down_rows=1)
         win.bind("<Escape>", lambda e: win.destroy())
 
     def _info_dialog(self, title, text):

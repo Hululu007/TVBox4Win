@@ -29,7 +29,13 @@ class Page(tk.Frame):
         super().__init__(master, bg=BG)
         self.app = app
         self.source_key = source_key or hawk.get(hawk.HOME_SOURCE)
-        self.bean = apiconfig.api_config.get(self.source_key)
+        self.bean = apiconfig.api_config.get(self.source_key) if self.source_key else None
+        if self.bean is None and apiconfig.api_config.source_bean_list:
+            # 记录里的站源在本次配置中已不存在（配置换了/源被删）→ 回落第一个可用站点，
+            # 否则整页空白（对应原版 getHomeSourceBean 空时刷新首页）
+            self.bean = apiconfig.api_config.source_bean_list[0]
+            self.source_key = self.bean.key
+            hawk.put(hawk.HOME_SOURCE, self.source_key)
         self.classes = []      # [(type_id, type_name)]
         self.vods = []         # [(vod_id, vod_name, vod_pic, vod_remarks)]
         self.page_index = 1
@@ -161,6 +167,11 @@ class Page(tk.Frame):
     def _load_classes(self):
         def run():
             self.load_err = None
+            if self.bean is None:
+                self.classes = []
+                self.load_err = "未选择首页站源，请在「切换源」里选一个站点"
+                ui_thread.run(self._render_tabs)
+                return
             try:
                 self.classes = data_api.get_classes(self.bean)
             except Exception as ex:
@@ -323,12 +334,12 @@ class Page(tk.Frame):
         if not alive:
             return
         if self.cur_class is None:
-            # 「主页」tab：豆瓣热播海报（对应原版合并页首页内容）
+            # 「主页」tab：按 设置 › 首页推荐 渲染（豆瓣热播/站点推荐/观看历史）
             for w in self.inner.winfo_children():
                 w.destroy()
             tk.Label(self.inner, text="加载中...", bg=BG, fg=FG_DIM,
                      font=tv_font(12)).grid(row=0, column=0, padx=10, pady=20)
-            self.after(1200, self._load_recommend)
+            self.after(200, self._load_home_tab)
             return
         for w in self.inner.winfo_children():
             w.destroy()
@@ -422,7 +433,7 @@ class Page(tk.Frame):
                 imgcache.drop(k)
                 return
             try:
-                photo = tk.PhotoImage(file=path)
+                photo = imgcache.fit_photo(tk.PhotoImage(file=path))
             except tk.TclError:
                 return
             imgcache.keep(k, photo)
@@ -491,10 +502,83 @@ class Page(tk.Frame):
         except tk.TclError:
             pass  # 页面已销毁
 
-    def _load_recommend(self):
-        """豆瓣热播（对应 UserFragment 首页推荐，按天缓存；失败静默）"""
+    # ---------- 首页 tab 内容区：推荐位（对应 UserFragment 首页推荐）----------
+    def _home_rec_mode(self):
+        """首页推荐类型 0 豆瓣热播 / 1 站点推荐 / 2 观看历史（HawkConfig.HOME_REC）"""
+        try:
+            return int(hawk.get(hawk.HOME_REC, hawk.DEFAULT_HOME_REC))
+        except (TypeError, ValueError):
+            return hawk.DEFAULT_HOME_REC
+
+    def _load_home_tab(self):
+        try:
+            if not self.winfo_exists() or self.cur_class is not None:
+                return
+        except tk.TclError:
+            return
+        mode = self._home_rec_mode()
+        if mode == 2:
+            self._load_home_history()
+        elif mode == 1:
+            self._load_site_rec()
+        else:
+            self._load_recommend()
+
+    def _load_site_rec(self):
+        """站点推荐：首页站源自带推荐列表
+
+        对应 UserFragment.homeSourceRec ← SourceViewModel.getSort(homeKey) 的
+        videoList（spider 走 homeVideoContent，CMS 走首页 ac=videolist 列表）
+        """
         def run():
-            import json
+            items = []
+            try:
+                vods, _, _ = data_api.get_vods(self.bean, None, 1)
+                items = [(n, p, r, v, self.source_key)
+                         for v, n, p, r in vods if n][:24]
+            except Exception as ex:
+                from .paths import log_error
+                log_error("首页站点推荐失败 bean=%s" %
+                          (self.bean.name if self.bean else "?"), ex)
+            if items:
+                ui_thread.run(lambda: self._render_home_items(
+                    "站点推荐", items, "site"))
+            else:
+                # 该源没有推荐数据 → 回落豆瓣热播（对应原版 homeSourceRec==null）
+                self._load_recommend()
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def _load_home_history(self):
+        """观看历史：本地播放记录前 24 条
+
+        对应 UserFragment HOME_REC==2 → RoomDataManger.getAllVodRecord(20)，
+        note 为「上次看到 xx」；长按（此处右键）删除记录。
+        """
+        from . import store
+        try:
+            recs = store.all_records(24)
+        except Exception as ex:
+            from .paths import log_error
+            log_error("读取观看历史失败", ex)
+            recs = []
+        items = []
+        for r in recs:
+            src = apiconfig.api_config.get(r["source_key"])
+            src_name = src.name if src else ""
+            ep = r.get("play_ep") or ""
+            note = f"上次看到 {ep}" if ep else ""
+            if note and src_name:
+                note = f"{src_name} · {note}"
+            elif not note:
+                note = src_name
+            items.append((r["vod_name"], r.get("vod_pic") or "", note,
+                          r["vod_id"], r["source_key"]))
+        self._render_home_items("观看历史", items, "history")
+
+    def _load_recommend(self):
+        """豆瓣热播（对应 UserFragment.setDouBanData，按天缓存；失败静默）"""
+        def run():
             today = datetime.date.today().isoformat()
             cache = hawk.get("douban_rec_day", None)
             items = None
@@ -517,45 +601,125 @@ class Page(tk.Frame):
                 if items:
                     hawk.put("douban_rec_day", {"day": today, "items": items})
             if items:
-                ui_thread.run(lambda: self._render_recommend(items))
+                ui_thread.run(lambda: self._render_home_items(
+                    "豆瓣热播",
+                    [(n, c, (f"评分 {rt}" if rt else ""), None, None)
+                     for n, c, rt in items], "douban"))
+            else:
+                ui_thread.run(lambda: self._render_home_items(
+                    "豆瓣热播", [], "douban"))
         import threading
         threading.Thread(target=run, daemon=True).start()
 
-    def _render_recommend(self, items):
-        """豆瓣热播横排海报（封面+片名+评分，点击跨源搜索，对应原版首页）"""
+    def _render_home_items(self, header, items, kind):
+        """首页推荐位渲染（kind：douban 豆瓣热播 / site 站点推荐 / history 观看历史）"""
         if not self.winfo_exists():
             return
         self._prio = 2  # 推荐位让路给网格/详情海报
         for w in self.inner.winfo_children():
             w.destroy()
+        cols = 6
+        head = tk.Frame(self.inner, bg=BG)
+        head.grid(row=0, column=0, columnspan=cols, sticky="ew", pady=(4, 10))
+        tk.Label(head, text=header, bg=BG, fg=ACCENT,
+                 font=tv_font(14, True)).pack(side="left", padx=(4, 0))
+        hint = {"douban": "点击海报 → 全源搜索播放",
+                "site": "点击海报 → 影片详情",
+                "history": "点击继续观看 · 右键删除记录"}.get(kind, "")
+        if hint:
+            tk.Label(head, text="　" + hint, bg=BG, fg=FG_DIM,
+                     font=tv_font(10)).pack(side="left")
+        # 按钮放左侧：内容区总宽可能超出视口，放右侧会被截掉
+        FocusLabel(head, text="　⚙ 更换推荐", bg=PANEL, fg=FG, font=tv_font(10),
+                   padx=10, pady=4,
+                   on_select=self._open_rec_setting).pack(side="left")
+        if not items:
+            msg = ("还没有观看记录：点开一部影片开始播放后，就会出现在这里"
+                   if kind == "history"
+                   else "该源暂无推荐内容，可到「设置 › 首页推荐」切换其它类型")
+            box = tk.Frame(self.inner, bg=BG)
+            box.grid(row=1, column=0, columnspan=cols, pady=40)
+            tk.Label(box, text=msg, bg=BG, fg=FG_DIM,
+                     font=tv_font(12)).pack(pady=(0, 10))
+            if kind == "history":
+                FocusLabel(box, text="去分类里看看", bg=ACCENT, fg="#FFFFFF",
+                           font=tv_font(12, True),
+                           on_select=self._goto_first_class).pack()
+            return
         btns = []
         for i, it in enumerate(items):
-            name, cover = it[0], it[1]
-            rate = it[2] if len(it) > 2 else ""
+            name, pic, note = it[0], it[1], it[2]
+            vod_id = it[3] if len(it) > 3 else None
+            src_key = it[4] if len(it) > 4 else None
             cell = tk.Frame(self.inner, bg=BG, padx=6, pady=6)
-            cell.grid(row=0, column=i)
+            cell.grid(row=1 + i // cols, column=i % cols)
             b = FocusLabel(cell, text="", bg=BG,
-                           on_select=lambda n=name: self._search_name(n))
+                           on_select=lambda n=name, v=vod_id, s=src_key:
+                           self._open_rec_item(kind, n, v, s))
             poster = tk.Label(cell, text=(name[:1] or "🎬"), width=11, height=6,
                               bg=POSTER_BG, fg="#4A5578", font=tv_font(22))
             poster.pack()
-            tk.Label(cell, text=name[:10], bg=BG, fg=FG,
-                     font=tv_font(11)).pack()
-            tk.Label(cell, text=(f"评分：{rate}" if rate else ""),
-                     bg=BG, fg=FG_DIM, font=tv_font(9)).pack()
+            tk.Label(cell, text=name[:12], bg=BG, fg=FG, font=tv_font(11),
+                     width=11).pack()
+            tk.Label(cell, text=(note or ""), bg=BG, fg=FG_DIM, font=tv_font(9),
+                     wraplength=104, justify="center", width=11).pack()
             b.place(in_=poster, relwidth=1.0, relheight=1.0)
             b.lower()
-            poster.bind("<Button-1>", lambda e, n=name: self._search_name(n))
+            click = (lambda e, n=name, v=vod_id, s=src_key:
+                     self._open_rec_item(kind, n, v, s))
+            for w in (poster, cell):
+                w.bind("<Button-1>", click)
+            if kind == "history":
+                dele = (lambda e, n=name, v=vod_id, s=src_key:
+                        self._delete_history(n, v, s))
+                for w in (poster, cell):
+                    w.bind("<Button-3>", dele)
             b.bind("<FocusIn>", lambda e, p=poster: p.configure(
                 highlightthickness=2, highlightbackground=ACCENT), add="+")
             b.bind("<FocusOut>", lambda e, p=poster: p.configure(
                 highlightthickness=0), add="+")
             btns.append(b)
-            if cover:
+            if pic:
                 self._seq += 1
-                self._load_poster(f"rec{self._seq}", poster, cover)
+                self._load_poster(f"rec{self._seq}", poster, pic)
         if btns:
             btns[0].focus_set()
+        from .theme import grid_key_nav
+        grid_key_nav(btns, cols)
+
+    # ---------- 推荐位交互 ----------
+    def _open_rec_item(self, kind, name, vod_id, src_key):
+        """点击推荐海报：豆瓣→跨源搜索；站点/历史→详情（msearch 仍走搜索）"""
+        if kind == "douban" or not vod_id:
+            self._search_name(name)
+            return
+        if str(vod_id).startswith("msearch:"):
+            self._search_name(name)
+            return
+        from .ui_detail import Page as DetailPage
+        self.app.switch(DetailPage, source_key=src_key or self.source_key,
+                        vod_id=vod_id, vod_name=name)
+
+    def _delete_history(self, name, vod_id, src_key):
+        """删除一条观看记录（对应原版长按删除模式）"""
+        from . import store
+        try:
+            store.delete_record(vod_id, src_key)
+        except Exception as ex:
+            from .paths import log_error
+            log_error("删除观看历史失败", ex)
+            return
+        self._load_home_history()
+
+    def _goto_first_class(self):
+        if self.classes:
+            self.select_class(self.classes[0][0])
+        else:
+            self._load_classes()
+
+    def _open_rec_setting(self):
+        from .ui_setting import Page as SettingPage
+        self.app.switch(SettingPage)
 
     def _search_name(self, name):
         """点击豆瓣海报 → 跨源搜索片名（对应原版首页推荐点击）"""

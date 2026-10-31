@@ -10,10 +10,12 @@ class Page(tk.Frame):
     """对应 ui/activity/PlayActivity.java"""
 
     def __init__(self, master, app, source_key, vod_id, vod_name,
-                 play_flag, play_ep, play_url, series=None, ep_index=0):
+                 play_flag, play_ep, play_url, series=None, ep_index=0,
+                 vod_pic=""):
         super().__init__(master, bg="#000000")
         self.app = app
         self.source_key, self.vod_id, self.vod_name = source_key, vod_id, vod_name
+        self.vod_pic = vod_pic  # 写历史记录用（首页「观看历史」推荐位显示海报）
         self.play_flag, self.ep_index = play_flag, ep_index
         self.series = series  # ((flag, names), urls)
         self.player = None
@@ -248,7 +250,8 @@ class Page(tk.Frame):
                     {"flag": flag, "ep_index": self.ep_index,
                      "speed": speed}, ensure_ascii=False)
                 store.save_record(source_key, vod_id, vod_name, "", flag,
-                                  ep_name, pos or 0, dur or 0, data_json)
+                                  ep_name, pos or 0, dur or 0, data_json,
+                                  self.vod_pic)
                 if last_real and pos:
                     store.save_progress(last_real, pos, dur or 0)
             except Exception as e:
@@ -265,6 +268,7 @@ class Page(tk.Frame):
                      "speed": self._speed}
         store.save_record(self.source_key, self.vod_id, self.vod_name,
                           "", self.play_flag, ep_name, pos or 0, dur or 0,
-                          __import__("json").dumps(data_json, ensure_ascii=False))
+                          __import__("json").dumps(data_json, ensure_ascii=False),
+                          self.vod_pic)
         if self._last_real and pos:
             store.save_progress(self._last_real, pos, dur or 0)

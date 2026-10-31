@@ -25,6 +25,10 @@ def _conn():
             _db.execute("ALTER TABLE vod_record ADD COLUMN data_json TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+        try:  # 首页「观看历史」推荐位需要海报
+            _db.execute("ALTER TABLE vod_record ADD COLUMN vod_pic TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         _db.execute("""CREATE TABLE IF NOT EXISTS vod_collect (
             vod_id TEXT, vod_name TEXT, source_key TEXT,
             vod_pic TEXT, update_time INTEGER,
@@ -69,12 +73,15 @@ def delete_progress(url):
 
 
 def save_record(source_key, vod_id, vod_name, play_tag, play_flag, play_ep,
-                pos, duration, data_json=""):
+                pos, duration, data_json="", vod_pic=""):
     with _lock:
         c = _conn()
-        c.execute("REPLACE INTO vod_record VALUES (?,?,?,?,?,?,?,?,?,?)",
+        c.execute("REPLACE INTO vod_record (vod_id, vod_name, source_key, "
+                  "play_tag, play_flag, play_ep, pos, duration, update_time, "
+                  "data_json, vod_pic) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                   (vod_id, vod_name, source_key, play_tag, play_flag, play_ep,
-                   pos, duration, int(time.time()), data_json or ""))
+                   pos, duration, int(time.time()), data_json or "",
+                   vod_pic or ""))
         c.commit()
 
 
@@ -96,14 +103,18 @@ def get_record(source_key, vod_id):
             "pos": row[3], "duration": row[4], "data_json": data}
 
 
-def all_records():
+def all_records(limit=0):
+    """全部播放记录（按更新时间倒序）；limit>0 时只取前 N 条（首页观看历史用）"""
+    sql = ("SELECT vod_id, vod_name, source_key, play_tag, play_flag, play_ep, "
+           "pos, duration, update_time, vod_pic FROM vod_record "
+           "ORDER BY update_time DESC")
+    if limit:
+        sql += " LIMIT %d" % int(limit)
     with _lock:
-        rows = _conn().execute(
-            "SELECT vod_id, vod_name, source_key, play_tag, play_flag, play_ep, "
-            "pos, duration, update_time FROM vod_record ORDER BY update_time DESC").fetchall()
+        rows = _conn().execute(sql).fetchall()
     return [{"vod_id": r[0], "vod_name": r[1], "source_key": r[2], "play_tag": r[3],
              "play_flag": r[4], "play_ep": r[5], "pos": r[6], "duration": r[7],
-             "update_time": r[8]} for r in rows]
+             "update_time": r[8], "vod_pic": r[9] or ""} for r in rows]
 
 
 def delete_record(vod_id, source_key):

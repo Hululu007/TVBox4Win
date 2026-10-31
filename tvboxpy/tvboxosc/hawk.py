@@ -46,6 +46,8 @@ def delete(key):
 
 # HawkConfig 键位对照
 HOME_SOURCE = "home_source"
+HOME_REC = "home_rec"      # 首页推荐：0 豆瓣热播 / 1 站点推荐 / 2 观看历史
+DEFAULT_HOME_REC = 1       # 对应 HawkConfig.DEFAULT_HOME_REC = 1
 HOME_API = "home_api"
 DEFAULT_API = "default_api"
 API_HISTORY = "api_history"

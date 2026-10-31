@@ -55,6 +55,7 @@ app/libs/
 # ---------- 截图与临时排查产物 ----------
 /shot*.png
 /t_*.png
+/s_*.png
 /tvboxpy/t_*.png
 /tvboxpy/t_*.txt
 /tvboxpy/t_try.mp4

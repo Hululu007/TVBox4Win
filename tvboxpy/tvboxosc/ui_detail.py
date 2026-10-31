@@ -171,7 +171,7 @@ class Page(tk.Frame):
                 imgcache.drop(k)
                 return
             try:
-                photo = tk.PhotoImage(file=path)
+                photo = imgcache.fit_photo(tk.PhotoImage(file=path))
             except tk.TclError:
                 return
             imgcache.keep(k, photo)
@@ -237,7 +237,7 @@ class Page(tk.Frame):
                         play_ep=ep_name, play_url=play_url,
                         series=(self.info["series_flags"][self.cur_flag],
                                 self.info["series_urls"][self.cur_flag]),
-                        ep_index=ep_index)
+                        ep_index=ep_index, vod_pic=self.info.get("pic") or "")
 
     def _collect(self):
         on = store.save_collect(self.source_key, self.vod_id, self.info["name"],

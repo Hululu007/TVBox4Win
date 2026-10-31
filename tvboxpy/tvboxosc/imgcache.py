@@ -78,6 +78,23 @@ def _is_image(data):
             or head[:2] == b"BM")                      # BMP
 
 
+def fit_photo(photo, max_w=150, max_h=200):
+    """海报缩放到格子尺寸（PhotoImage.subsample 整数倍抽样，不引入 PIL 依赖）。
+
+    之前直接用原图尺寸 configure(width=...)，CMS 源原图 247px+，
+    六列网格总宽超出视口，最后一列被截掉。
+    """
+    try:
+        w, h = photo.width(), photo.height()
+        fx = max(1, -(-w // max_w))
+        fy = max(1, -(-h // max_h))
+        if fx > 1 or fy > 1:
+            photo = photo.subsample(fx, fy)
+    except Exception:
+        pass
+    return photo
+
+
 def _candidate_urls(url):
     """豆瓣图片多域名镜像：img9 常被软封，优先 img1/2/3（同路径同一张图）"""
     m = re.match(r"(https?)://(img\d+)\.doubanio\.com(/.*)$", url)
