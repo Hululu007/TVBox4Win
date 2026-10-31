@@ -1,20 +1,141 @@
-# tvbox2exe
+# tvboxpy — TVBox Windows 桌面复刻（Python 版）
 
-把 TVBox（安卓 TV 影视聚合播放器）搬到 Windows 桌面的复刻项目。
+把安卓 TV 上流行的影视聚合播放器 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 复刻到 Windows 桌面：
+**Python 3 + tkinter + libmpv** 实现，单文件 EXE 即可运行，UI 与交互按原版逐页对齐。
 
-- **`tvboxpy/`** —— 主项目：Python + tkinter + libmpv 实现的 TVBox 复刻，详见 [tvboxpy/README.md](tvboxpy/README.md)
-- **`reference/`** —— 开发时对齐 UI / 交互所参照的原版安卓源码（TVBoxOSC fork）与参考截图，仅供学习对照，不参与构建
+> 本项目仅供学习交流，请勿用于商业用途。影片数据均来自用户自行配置的第三方接口，与本项目无关。
 
-## 快速开始
+---
 
-```
+## ✨ 功能特性
+
+| 模块 | 说明 | 对齐原版 |
+|---|---|---|
+| 接口配置 | 兼容 TVBox 各类配置（纯 JSON / 带 BOM / 文本内嵌 JSON），自动解析站点、直播、解析规则、spider 地址 | `ApiConfig.java` |
+| 首页推荐 | 豆瓣热播 / 站点推荐 / 观看历史 三模式切换，设置中一键更换 | `HawkConfig.HOME_REC` |
+| 分类浏览 | 站点 → 分类 → 影片网格；海报异步加载、优先级调度、豆瓣镜像兜底、失败黑名单 | `HomeActivity` / `GridFragment` |
+| 关键词搜索 | 多站点并发搜索、实时进度状态栏、热词分词 chips（点击换词重搜）、结果按相关度排序 | `FastSearchActivity` |
+| 详情页 | 影片信息 chips（年份/地区/类型）、多线路多选集（千集长剧分批渲染不卡顿）、播放地址展示、收藏 / 快速搜索 | `DetailActivity` |
+| 视频播放 | libmpv 全屏沉浸式播放；悬浮控制栏（4 秒无操作自动隐藏）；断点续播；播完自动连播 | `PlayActivity` |
+| 播放器控制栏 | 暂停/上一集/下一集/重播/全屏/音量/倍速/选集 + 可拖动进度条（当前时间/总时长），与原版 `player_vod_control_view.xml` 同布局 | 同左 |
+| 直播 | lives 接口加载频道分组，EPG 节目单 | `LivePlayActivity` |
+| 收藏/历史 | SQLite 持久化，历史上限自动裁剪（30/50/100 条可选），历史卡片显示进度与上次观看位置 | `VodRecord` |
+| 推送 | 手机扫码/HTTP 推送播放链接到桌面播放 | `PushActivity` |
+| 设置 | 配置地址、配置历史、首页站源、首页推荐、解码方式（硬解/软解）、画面缩放（默认/16:9/4:3/填充/原始）、历史上限、下次进入、清空缓存 | `ModelSettingFragment` |
+
+### 爬虫运行时（type 3 站点支持）
+
+现代 TVBox 配置的站点大多是 type 3 spider 站点，本项目内置三种运行时：
+
+| 爬虫类型 | 运行时 | 依赖 |
+|---|---|---|
+| `csp_*.js` JS 爬虫 | 内置 [drpy](https://github.com/hjdhnx/dr_py) 运行时（Node 子进程 `bridge.js` + stdio JSON-RPC） | **Node.js** |
+| `*.py` Py 爬虫 | 内置 Python 基类（与 tvboxosc-python pyramid 运行时同 API） | 无额外依赖 |
+| `*.jar` Jar 爬虫 | dex→jar 转换 + JVM 桥（`jvmrt/`） | **JDK/JRE 17+**，`jvmrt/` + `dex-tools-v2.4/` 资产目录 |
+
+---
+
+## 📦 运行依赖
+
+| 依赖 | 版本要求 | 用途 | 必需？ |
+|---|---|---|---|
+| [Python](https://www.python.org/) | 3.10+ | 运行主程序 | ✅ 必需 |
+| `requests` | 最新 | HTTP 请求 | ✅ 必需 |
+| [python-mpv](https://github.com/jaseg/python-mpv) (`mpv`) | 最新 | libmpv 的 Python 绑定 | ✅ 必需 |
+| [libmpv](https://github.com/shinchiro/mpv-winbuild-cmake/releases) | `libmpv-2.dll` | 视频播放内核 | ✅ 必需 |
+| [Node.js](https://nodejs.org/) | 16+ | 运行 JS 爬虫站点 | 仅 JS 站点需要 |
+| [JDK](https://learn.microsoft.com/java/openjdk/download) | 17+（已验证 21） | 运行 Jar 爬虫站点 + dex 转换 | 仅 Jar 站点需要 |
+| [PyInstaller](https://pyinstaller.org/) | 最新 | 打包 EXE | 仅打包需要 |
+
+**libmpv 获取方式**：从 [shinchiro/mpv-winbuild-cmake releases](https://github.com/shinchiro/mpv-winbuild-cmake/releases) 下载 `mpv-dev-x86_64-*-git-*.7z`，解压出 `libmpv-2.dll` 放入 `tvboxpy/third_party/mpv/`（`include/` 头文件已随仓库提供，无需下载）。
+
+---
+
+## 🚀 从源码运行
+
+```bash
 cd tvboxpy
 pip install requests python-mpv
-python main.py
+
+# 将 libmpv-2.dll 放入 third_party/mpv/ 后：
+python main.py                 # 使用内置默认接口
+python main.py <配置URL或本地json路径>   # 指定接口
 ```
 
-打包发布：`python build_exe.py`，产物 `tvboxpy/dist/tvboxpy.exe`。
+启动后即进入主页海报墙，方向键/鼠标均可操作；`F11` 全局切换全屏。
 
-## 历史
+## 🧱 打包 EXE
 
-项目最早用 C + libmpv 直接实现（原型验证），后整体迁移到 Python 方案（`tvboxpy/`）并持续迭代至今；C 版原型已在仓库历史中保留。
+```bash
+cd tvboxpy
+python build_exe.py
+```
+
+产物：`tvboxpy/dist/tvboxpy.exe`（单文件）+ 同目录 `jvmrt/`、`dex-tools-v2.4/`（Jar 爬虫运行资产，发布时一并携带）。
+
+## 📁 目录结构
+
+```
+tvbox2exe/
+├── tvboxpy/                  # ★ 主项目
+│   ├── main.py               # 程序入口（对应 App.java 启动流程）
+│   ├── tvboxosc/             # 应用源码
+│   │   ├── app.py            #   主窗口与页面路由
+│   │   ├── ui_*.py           #   主页/搜索/详情/播放/设置/收藏/历史/直播/推送
+│   │   ├── player.py         #   libmpv 封装（核心预热复用、断点续播、倍速）
+│   │   ├── data_api.py       #   CMS 接口 + 播放地址解析/页面嗅探
+│   │   ├── spider.py         #   spider 分发（js/py/jar）
+│   │   ├── spider_runtime/   #   JS 爬虫运行时（drpy.js + Node bridge）
+│   │   ├── jar_spider.py     #   Jar 爬虫：dex→jar 转换 + JVM 桥
+│   │   ├── py_spider.py      #   Py 爬虫基类
+│   │   ├── apiconfig.py      #   接口配置解析
+│   │   ├── store.py / hawk.py#   观看历史(SQLite) / 配置存储
+│   │   └── theme.py / imgcache.py  # 暗色主题 / 海报缓存
+│   ├── third_party/mpv/      # libmpv 开发库（dll 不入库，见上文获取方式）
+│   ├── tests/                # 自动化验证脚本（EXE 像素级 UI 回归测试）
+│   ├── build_exe.py          # 一键打包脚本
+│   └── tvboxpy.spec          # PyInstaller 配置
+├── reference/                # 开发时对齐 UI/交互所参照的原版安卓源码
+│   ├── app/                  #   TVBoxOSC fork 主工程（版权归原项目所有）
+│   ├── player/               #   ijkplayer 源码
+│   └── ref/                  #   原版界面参考截图
+└── build/                    # 打包资产源（jvmrt/ + dex-tools-v2.4/，gitignored）
+```
+
+## ⌨️ 播放页快捷键
+
+| 按键 | 功能 | 按键 | 功能 |
+|---|---|---|---|
+| `空格` | 暂停 / 继续 | `←` / `→` | 快退 / 快进 10 秒 |
+| `↑` / `↓` | 音量调节 | `PgUp` / `PgDn` | 上一集 / 下一集 |
+| `F` | 全屏 / 窗口切换 | `Esc` / `BackSpace` | 返回 |
+
+控制栏在 4 秒无操作后自动隐藏，移动鼠标或按任意键唤出。
+
+## 🛠 工作原理（简述）
+
+```
+main.py 启动
+  └─ ApiConfig 加载配置 JSON（站点/直播/解析/spider）
+       ├─ type 0/1 站点 ──► data_api：CMS JSON/XML 接口直连
+       │                     播放地址：媒体直链直接播；网页链接走页面嗅探/parses 解析
+       ├─ type 3 js 站点 ──► Node 子进程跑 drpy 运行时（stdio JSON-RPC）
+       ├─ type 3 py 站点 ──► Python 内置基类动态加载
+       └─ type 3 jar 站点 ─► dex→jar 转换（md5 缓存）→ JVM 桥 SpiderRunner
+            └─ 统一接口：home/category/detail/search/playerContent
+播放 ──► ui_play 后台解析地址 → libmpv（悬浮控制栏 + 断点续播 + 自动连播）
+```
+
+## ❓ 常见问题
+
+- **启动后白屏/无站点**：默认接口依赖网络可达，可在设置 → 配置地址里换一个接口源。
+- **点影片没反应**：豆瓣壳源（msearch）点击会自动跳搜索页，与原版行为一致；个别慢源需等待嗅探解析。
+- **JS 站点报「未找到 node 运行时」**：安装 Node.js 并确保 `node` 在 PATH 中。
+- **Jar 站点报「未找到 java 运行时」**：安装 JDK 17+ 并确保 `java` 在 PATH 中；发布包需带 `jvmrt/` 与 `dex-tools-v2.4/`。
+- **播放黑屏**：多为该源地址失效，切换线路或换站点；可在设置中尝试软解码。
+
+## 📜 致谢与声明
+
+- [TVBoxOSC](https://github.com/o0HalfLife0o/TVBoxOSC)（及各家 fork）—— 原版安卓应用，本项目 UI/交互的参照对象，`reference/` 目录内为其源码副本，版权归原项目所有
+- [drpy](https://github.com/hjdhnx/dr_py)、[libmpv](https://mpv.io/) —— 爬虫运行时与播放内核
+- 本项目不存储、不提供任何影视内容；所有数据均来自用户配置的第三方接口
