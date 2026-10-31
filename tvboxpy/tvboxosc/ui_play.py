@@ -29,20 +29,41 @@ class Page(tk.Frame):
         self._speeds = [1.0, 1.25, 1.5, 2.0, 0.5]
         self._app_binds = []
         self._seq = 0  # 播放请求序号：后台解析返回时页面可能已切集/销毁
+        self._hide_job = None
 
-        # 顶部悬浮：返回 + 标题 + 选集面板开关
+        # 全屏沉浸播放（对应原版 PlayActivity 全屏）：进入播放页自动全屏，
+        # 返回时恢复之前的窗口状态
+        self._was_full = False
+        try:
+            self._was_full = bool(self.app.attributes("fullscreen"))
+            self.app.attributes("-fullscreen", True)
+        except Exception:
+            pass
+
+        # 视频区域铺满整页；控制栏/状态栏悬浮其上（自动隐藏）
+        self.video = tk.Frame(self, bg="#000000", highlightthickness=0)
+        self.video.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        self.video.configure(width=100, height=100)
+
         bar = tk.Frame(self, bg="#000000")
         bar.place(x=0, y=0, relwidth=1.0)
+        self.bar = bar
         self._bar_widgets(bar)
-
-        self.video = tk.Frame(self, bg="#000000", highlightthickness=0)
-        self.video.place(x=0, y=34, relwidth=1.0, relheight=1.0, height=-34)
-        self.video.configure(width=100, height=100)
+        bar.lift()  # bar 与 video 重叠，必须保持在 mpv 之上
 
         # 底部状态：进度 + 集名
         self.status = tk.Label(self, text="", bg="#000000", fg=FG_DIM,
                                font=tv_font(11))
         self.status.place(x=16, rely=0.94)
+
+        # 沉浸式控制栏：无操作 4 秒后隐藏，鼠标移动/按键/点击唤出
+        for seq in ("<Motion>", "<Any-KeyPress>", "<Button-1>"):
+            try:
+                fid = self.app.bind(seq, self._show_chrome, add="+")
+                self._app_binds.append((seq, fid))
+            except Exception:
+                pass
+        self._show_chrome()
 
         # Esc / BackSpace 也能返回（绑在顶层窗口，播放时焦点常在 mpv 子窗口，
         # 绑在本 Frame 上收不到按键）
@@ -67,6 +88,22 @@ class Page(tk.Frame):
         self.speed_btn = FocusLabel(bar, text="倍速 1.0x", font=tv_font(12),
                                     on_select=self._cycle_speed)
         self.speed_btn.pack(side="right", padx=12)
+
+    def _show_chrome(self, _e=None):
+        """唤出控制栏并重置自动隐藏计时（沉浸式，对应原版触摸唤出控制栏）"""
+        self.bar.place(x=0, y=0, relwidth=1.0)
+        self.status.place(x=16, rely=0.94)
+        if self._hide_job:
+            try:
+                self.after_cancel(self._hide_job)
+            except Exception:
+                pass
+        self._hide_job = self.after(4000, self._hide_chrome)
+
+    def _hide_chrome(self):
+        self._hide_job = None
+        self.bar.place_forget()
+        self.status.place_forget()
 
     def _cycle_speed(self):
         """倍速循环（对应 resetSpeed 面板）"""
@@ -175,6 +212,10 @@ class Page(tk.Frame):
         panel = tk.Toplevel(self)
         panel.title("选集")
         panel.configure(bg="#101010")
+        try:
+            panel.attributes("-topmost", True)  # 全屏时保持可见
+        except Exception:
+            pass
         names, urls = self.series[0][1], self.series[1]
         cols = 6
         for i, (n, u) in enumerate(zip(names, urls)):
@@ -213,13 +254,20 @@ class Page(tk.Frame):
         self._app_binds = []
 
         # 1) 停掉定时任务（必须在切页前，否则回调打到已销毁的控件）
-        for job in (self._pos_job, self._seek_job, self._save_job):
+        for job in (self._pos_job, self._seek_job, self._save_job,
+                    self._hide_job):
             if job:
                 try:
                     self.after_cancel(job)
                 except Exception:
                     pass
-        self._pos_job = self._seek_job = self._save_job = None
+        self._pos_job = self._seek_job = self._save_job = self._hide_job = None
+
+        # 恢复进入播放页前的窗口状态（退出全屏沉浸）
+        try:
+            self.app.attributes("-fullscreen", self._was_full)
+        except Exception:
+            pass
 
         player = self.player
         self.player = None
