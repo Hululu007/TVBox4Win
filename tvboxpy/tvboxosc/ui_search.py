@@ -6,7 +6,7 @@ import re
 import threading
 import tkinter as tk
 
-from . import apiconfig, data_api, hawk, imgcache, ui_thread
+from . import apiconfig, data_api, hawk, imgcache, poster_grid, ui_thread
 from .theme import BG, FG, FG_DIM, ACCENT, FocusLabel, tv_font, PANEL, PANEL_HI, POSTER_BG
 
 # 副标题分隔符：豆瓣片名常带「-祸进谭-」「：xxx」「·xxx」，整串去搜基本搜不到
@@ -54,8 +54,7 @@ def match_result(name, kw):
 class Page(tk.Frame):
     """对应 ui/activity/FastSearchActivity.java"""
 
-    COLS = 5
-    CARD_W = 128
+    COLS = 5  # 默认列数；实际由 _calc_card_layout 按窗口宽度自适应覆盖
 
     def __init__(self, master, app, pre_key=None):
         super().__init__(master, bg=BG)
@@ -104,7 +103,10 @@ class Page(tk.Frame):
         self._result_grid = tk.Frame(canvas, bg=BG)
         self._result_grid.bind("<Configure>", lambda e: canvas.configure(
             scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self._result_grid, anchor="nw")
+        self._win_id = canvas.create_window((0, 0), window=self._result_grid,
+                                            anchor="nw")
+        # 结果区宽度跟随画布 + 列数随窗口宽度自适应（避免右侧留白）
+        canvas.bind("<Configure>", self._on_canvas_resize)
         canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
@@ -207,6 +209,7 @@ class Page(tk.Frame):
         self._slow = 0
         for w in self._result_grid.winfo_children():
             w.destroy()
+        self._calc_card_layout()
         self._render_chips(kw)
         self._render_filter()
         self._update_status()
@@ -344,53 +347,102 @@ class Page(tk.Frame):
         self._shown_key = key
         for w in self._result_grid.winfo_children():
             w.destroy()
+        self._calc_card_layout()
         self._rendered = set()
         self._result_count = 0
         self._render_filter()
         self._refresh_visible(self._token, force=True)
 
+    # ── 自适应结果网格：列数/卡片尺寸随结果区宽度计算 ──
+    def _calc_card_layout(self):
+        try:
+            w = self._canvas.winfo_width()
+        except tk.TclError:
+            w = 0
+        if w < 80:   # 尚未完成首次布局：按窗口宽扣掉左侧源筛选列估算
+            try:
+                w = max(self.winfo_width() - 260, 560)
+            except tk.TclError:
+                w = 960
+        cols, _cw, pw, ph = poster_grid.layout(w)
+        self.COLS = cols          # 覆盖类常量：本次搜索/筛选会话内保持不变
+        self._card_size = (pw, ph)
+        poster_grid.fill_columns(self._result_grid, cols)
+        try:
+            self._canvas.itemconfigure(self._win_id, width=w)
+        except tk.TclError:
+            pass
+
+    def _on_canvas_resize(self, e):
+        try:
+            self._canvas.itemconfigure(self._win_id, width=e.width)
+        except tk.TclError:
+            return
+        if e.width < 80:
+            return
+        job = getattr(self, "_rz_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._rz_job = self.after(400, self._relayout_cards)
+
+    def _relayout_cards(self):
+        """窗口变宽/变窄后按新宽度重列卡片（数据都在，重画不重搜）"""
+        self._rz_job = None
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        old = (getattr(self, "COLS", 0), getattr(self, "_card_size", (0, 0)))
+        self._calc_card_layout()
+        if (self.COLS, self._card_size) == old:
+            return
+        for w in self._result_grid.winfo_children():
+            w.destroy()
+        self._rendered = set()
+        self._result_count = 0
+        self._refresh_visible(self._token, force=True)
+
     # ── 结果卡片：海报 + 源名角标 + remark + 标题（对应 item_search）──
     def _make_card(self, grid, idx, bean, vid, name, pic, remark):
-        cell = tk.Frame(grid, bg=PANEL, padx=4, pady=4)
-        cell.grid(row=idx // self.COLS, column=idx % self.COLS,
-                  padx=6, pady=6, sticky="n")
-        poster = tk.Label(cell, text=(name[:1] or "🎬"), width=15, height=8,
-                          bg=POSTER_BG, fg="#4A5578", font=tv_font(24))
-        poster.pack()
+        pw, ph = getattr(self, "_card_size", (160, 240))
+        tag = f"{bean.name[:8]} {remark[:10]}".strip()
+        cell, _focus, poster = poster_grid.cell(
+            grid, idx // self.COLS, idx % self.COLS, pw, ph, name, tag,
+            on_open=lambda b=bean, v=vid, n=name: self._open_detail(b, v, n),
+            cell_bg=PANEL, overlay=False)
         if pic:
-            self._load_poster(f"s{bean.key}|{vid}", poster, pic)
-        tag = tk.Label(cell, text=f"{bean.name[:8]} {remark[:10]}".strip(),
-                       bg=PANEL, fg=FG_DIM, font=tv_font(9))
-        tag.pack(fill="x")
-        nm = tk.Label(cell, text=name[:16], bg=PANEL, fg=FG, font=tv_font(11))
-        nm.pack(fill="x")
-        for w in (cell, poster, tag, nm):
-            w.bind("<Button-1>", lambda e, b=bean, v=vid, n=name:
-                   self._open_detail(b, v, n))
+            self._load_poster(f"s{bean.key}|{vid}", poster, pic,
+                              size=(pw, ph))
         try:
             cell.bind("<Enter>", lambda e, c=cell: c.configure(bg=PANEL_HI))
             cell.bind("<Leave>", lambda e, c=cell: c.configure(bg=PANEL))
         except Exception:
             pass
 
-    def _load_poster(self, key, poster, pic):
+    def _load_poster(self, key, poster, pic, size=None):
         url, headers = imgcache.parse_pic(pic)
         if not url.startswith("http"):
             return
+        max_w, max_h = size or (150, 200)
 
         def on_ready(k, path):
             if not self.winfo_exists() or not poster.winfo_exists():
                 imgcache.drop(k)
                 return
             try:
-                photo = imgcache.fit_photo(tk.PhotoImage(file=path))
+                photo = imgcache.fit_photo(tk.PhotoImage(file=path),
+                                           max_w, max_h)
             except tk.TclError:
                 return
             imgcache.keep(k, photo)
             poster.configure(image=photo, text="", width=photo.width(),
                              height=photo.height())
 
-        imgcache.load(key, url, on_ready, headers, priority=0)
+        imgcache.load(key, url, on_ready, headers, priority=0, size=size)
 
     def _open_detail(self, bean, vod_id, name):
         from .ui_detail import Page as DetailPage

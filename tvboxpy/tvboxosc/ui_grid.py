@@ -6,8 +6,8 @@ from . import ui_thread, imgcache
 
 import requests
 
-from . import apiconfig, hawk
-from .theme import BG, FG, FG_DIM, ACCENT, FOCUS_BG, FOCUS_FG, FocusLabel, tv_font, PANEL, POSTER_BG
+from . import apiconfig, hawk, poster_grid
+from .theme import BG, FG, FG_DIM, ACCENT, FOCUS_BG, FOCUS_FG, FocusLabel, tv_font, PANEL
 from . import data_api
 
 MENU = [
@@ -69,15 +69,17 @@ class Page(tk.Frame):
         self.filter_btn.pack(side="right", padx=4)
         self.filter_btn.pack_forget()  # 默认隐藏，分类加载后按需显示
 
-        # 功能按钮排（对应原版合并页：历史/直播/搜索/推送/收藏/设置 一横排）
+        # 功能按钮排（对应原版合并页：历史/直播/搜索/推送/收藏/设置 一横排，
+        # 原版是大按钮均分整行宽度）
         row = tk.Frame(self, bg=BG)
-        row.pack(fill="x", padx=20, pady=(2, 4))
+        row.pack(fill="x", padx=16, pady=(2, 6))
         self._menu_btns = []
-        for name, target, icon in MENU:
+        for i, (name, target, icon) in enumerate(MENU):
+            row.grid_columnconfigure(i, weight=1, uniform="menu")
             b = FocusLabel(row, text=f"{icon} {name}", bg=PANEL, fg=FG,
-                           font=tv_font(14, True), padx=22, pady=10,
+                           font=tv_font(15, True), pady=10,
                            on_select=lambda t=target: self._go_menu(t))
-            b.pack(side="left", padx=(0, 10))
+            b.grid(row=0, column=i, padx=4, sticky="ew")
             self._menu_btns.append(b)
         for b in self._menu_btns:  # 横排左右导航
             b.bind("<Right>", lambda e, bs=self._menu_btns: self._nav(e, bs, 1))
@@ -91,7 +93,10 @@ class Page(tk.Frame):
         self.inner = tk.Frame(self.canvas, bg=BG)
         self.inner.bind("<Configure>", lambda e: self.canvas.configure(
             scrollregion=self.canvas.bbox("all")))
-        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self._win = self.canvas.create_window((0, 0), window=self.inner,
+                                              anchor="nw")
+        # 内容区宽度跟随画布（否则列宽均分后 inner 仍按内容宽，右侧照样留白）
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
         self.canvas.configure(yscrollcommand=sb.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
@@ -481,33 +486,21 @@ class Page(tk.Frame):
             tk.Label(self.inner, text="暂无内容", bg=BG, fg=FG_DIM,
                      font=tv_font(13)).grid(row=0, column=0, padx=20, pady=20)
             return
-        cols = 6
+        # 自适应列数：按可用宽度算列，整行均分填满（对应原版 GridLayoutManager）
+        cols, _cell_w, pw, ph = self._grid_layout()
+        poster_grid.fill_columns(self.inner, cols)
+        self._layout_used = (cols, pw)
         btns = []
         for i, (vid, name, pic, remark) in enumerate(vods):
-            cell = tk.Frame(self.inner, bg=BG, padx=6, pady=6)
-            cell.grid(row=i // cols, column=i % cols)
-            # 键盘焦点承载层（沉到海报底下，不遮挡图片）
-            b = FocusLabel(cell, text="", bg=BG,
-                           on_select=lambda v=vid, n=name: self._open_detail(v, n))
-            poster = tk.Label(cell, text=(name[:1] or "🎬"), width=13, height=7,
-                              bg=POSTER_BG, fg="#4A5578", font=tv_font(26))
-            poster.pack()
-            tk.Label(cell, text=name[:12], bg=BG, fg=FG,
-                     font=tv_font(11)).pack()
-            tk.Label(cell, text=remark or "", bg=BG, fg=FG_DIM,
-                     font=tv_font(9)).pack()
-            b.place(in_=poster, relwidth=1.0, relheight=1.0)
-            b.lower()  # 沉底：海报显示在最上层
-            poster.bind("<Button-1>", lambda e, v=vid, n=name: self._open_detail(v, n))
-            # 焦点时给海报描边（add=True 保留 FocusLabel 自身焦点逻辑）
-            b.bind("<FocusIn>", lambda e, p=poster: p.configure(
-                highlightthickness=2, highlightbackground=ACCENT), add="+")
-            b.bind("<FocusOut>", lambda e, p=poster: p.configure(
-                highlightthickness=0), add="+")
+            _cell, b, poster = poster_grid.cell(
+                self.inner, i // cols, i % cols, pw, ph, name, remark or "",
+                on_open=lambda v=vid, n=name: self._open_detail(v, n))
             btns.append(b)
             if pic:
                 self._seq += 1
-                self._load_poster(f"p{self._seq}", poster, pic)
+                self._load_poster(f"p{self._seq}", poster, pic, size=(pw, ph))
+        from .theme import grid_key_nav
+        grid_key_nav(btns, cols)
         # 分页
         pager = tk.Frame(self.inner, bg=BG)
         pager.grid(row=(len(vods) + cols - 1) // cols + 1, column=0,
@@ -520,22 +513,73 @@ class Page(tk.Frame):
         if btns:
             btns[0].focus_set()
 
-    def _load_poster(self, key, poster, url):
+    # ---------- 自适应布局 ----------
+    def _grid_layout(self):
+        """当前内容区可用宽度 → (cols, cell_w, poster_w, poster_h)"""
+        try:
+            w = self.canvas.winfo_width()
+        except tk.TclError:
+            w = 0
+        if w < 80:   # 尚未完成首次布局：按窗口宽估算
+            try:
+                w = max(self.winfo_width() - 80, 640)
+            except tk.TclError:
+                w = 1180
+        return poster_grid.layout(w)
+
+    def _on_canvas_resize(self, e):
+        try:
+            self.canvas.itemconfigure(self._win, width=e.width)
+        except tk.TclError:
+            return
+        if e.width < 80:
+            return
+        job = getattr(self, "_rz_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        self._rz_job = self.after(350, self._relayout)
+
+    def _relayout(self):
+        """窗口宽度变化后按新宽度重排网格（列数或格子尺寸变了才重渲染）"""
+        self._rz_job = None
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        cols, _cw, pw, _ph = self._grid_layout()
+        if (cols, pw) == getattr(self, "_layout_used", None):
+            return
+        if self.cur_class is None:
+            args = getattr(self, "_rec_args", None)
+            if args:
+                self._render_home_items(*args)
+        elif self.vods:
+            self._render_grid(self.vods, self.page_index, self.page_count)
+
+    def _load_poster(self, key, poster, url, size=None):
         url, headers = imgcache.parse_pic(url)
         if not url.startswith("http"):
             return
+        max_w, max_h = size or (150, 200)
+
         def on_ready(k, path):
             if not self.winfo_exists() or not poster.winfo_exists():
                 imgcache.drop(k)
                 return
             try:
-                photo = imgcache.fit_photo(tk.PhotoImage(file=path))
+                photo = imgcache.fit_photo(tk.PhotoImage(file=path),
+                                           max_w, max_h)
             except tk.TclError:
                 return
             imgcache.keep(k, photo)
             poster.configure(image=photo, text="", width=photo.width(),
                              height=photo.height())
-        imgcache.load(key, url, on_ready, headers, priority=self._prio)
+        imgcache.load(key, url, on_ready, headers, priority=self._prio,
+                      size=size)
 
     def _next_page(self):
         self.page_index += 1
@@ -712,9 +756,12 @@ class Page(tk.Frame):
         if not self.winfo_exists():
             return
         self._prio = 2  # 推荐位让路给网格/详情海报
+        self._rec_args = (header, items, kind)  # 窗口变宽后 _relayout 重排用
         for w in self.inner.winfo_children():
             w.destroy()
-        cols = 6
+        cols, _cell_w, pw, ph = self._grid_layout()
+        poster_grid.fill_columns(self.inner, cols)
+        self._layout_used = (cols, pw)
         head = tk.Frame(self.inner, bg=BG)
         head.grid(row=0, column=0, columnspan=cols, sticky="ew", pady=(4, 10))
         tk.Label(head, text=header, bg=BG, fg=ACCENT,
@@ -747,37 +794,19 @@ class Page(tk.Frame):
             name, pic, note = it[0], it[1], it[2]
             vod_id = it[3] if len(it) > 3 else None
             src_key = it[4] if len(it) > 4 else None
-            cell = tk.Frame(self.inner, bg=BG, padx=6, pady=6)
-            cell.grid(row=1 + i // cols, column=i % cols)
-            b = FocusLabel(cell, text="", bg=BG,
-                           on_select=lambda n=name, v=vod_id, s=src_key:
-                           self._open_rec_item(kind, n, v, s))
-            poster = tk.Label(cell, text=(name[:1] or "🎬"), width=11, height=6,
-                              bg=POSTER_BG, fg="#4A5578", font=tv_font(22))
-            poster.pack()
-            tk.Label(cell, text=name[:12], bg=BG, fg=FG, font=tv_font(11),
-                     width=11).pack()
-            tk.Label(cell, text=(note or ""), bg=BG, fg=FG_DIM, font=tv_font(9),
-                     wraplength=104, justify="center", width=11).pack()
-            b.place(in_=poster, relwidth=1.0, relheight=1.0)
-            b.lower()
-            click = (lambda e, n=name, v=vod_id, s=src_key:
-                     self._open_rec_item(kind, n, v, s))
-            for w in (poster, cell):
-                w.bind("<Button-1>", click)
+            dele = None
             if kind == "history":
                 dele = (lambda e, n=name, v=vod_id, s=src_key:
                         self._delete_history(n, v, s))
-                for w in (poster, cell):
-                    w.bind("<Button-3>", dele)
-            b.bind("<FocusIn>", lambda e, p=poster: p.configure(
-                highlightthickness=2, highlightbackground=ACCENT), add="+")
-            b.bind("<FocusOut>", lambda e, p=poster: p.configure(
-                highlightthickness=0), add="+")
+            _cell, b, poster = poster_grid.cell(
+                self.inner, 1 + i // cols, i % cols, pw, ph, name, note or "",
+                on_open=lambda n=name, v=vod_id, s=src_key:
+                self._open_rec_item(kind, n, v, s),
+                on_right_click=dele)
             btns.append(b)
             if pic:
                 self._seq += 1
-                self._load_poster(f"rec{self._seq}", poster, pic)
+                self._load_poster(f"rec{self._seq}", poster, pic, size=(pw, ph))
         if btns:
             btns[0].focus_set()
         from .theme import grid_key_nav
