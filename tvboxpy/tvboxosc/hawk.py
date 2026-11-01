@@ -64,3 +64,4 @@ HISTORY_NUM = "history_num"        # 历史记录上限：0→30条 / 1→50条 
 IJK_CACHE_PLAY = "ijk_cache_play"
 LIVE_CHANNEL = "live_channel"          # 直播记忆上次频道（group/name）
 LIVE_CONNECT_TIMEOUT = "live_connect_timeout"
+EPG_URL = "epg_url"                    # 节目单地址（对应 HawkConfig.EPG_URL）

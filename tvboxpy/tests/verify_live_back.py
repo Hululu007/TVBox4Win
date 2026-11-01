@@ -101,10 +101,12 @@ def step_assert1():
     check(bool(p.clock.cget('text')), f'右上角时钟有值：{p.clock.cget("text")}')
 
     # 2. 底部控制栏按钮
+    import tkinter as tk
     texts = []
     for w in p.bottom.winfo_children():
         for b in w.winfo_children():
-            texts.append(str(b.cget('text')))
+            if isinstance(b, tk.Label):
+                texts.append(str(b.cget('text')))
     print('底部按钮：', texts, flush=True)
     for t in ('⏸ 暂停', '⏮ 上一台', '⏭ 下一台', '⇄ 换源', '☰ 频道列表',
               '⛶ 窗口/全屏', '✕ 退出直播'):

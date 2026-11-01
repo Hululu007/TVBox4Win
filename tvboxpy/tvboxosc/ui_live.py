@@ -1,13 +1,28 @@
-"""直播页 LivePlayActivity 复刻：txt/m3u 频道列表解析 + mpv 播放 + 分组/换台"""
+"""直播页 LivePlayActivity 复刻：txt/m3u 频道列表解析 + mpv 播放 + 分组/换台 + EPG"""
 import os
+import re
 import threading
 import tkinter as tk
 
-from . import apiconfig, hawk, ui_thread
+from . import apiconfig, epg, hawk, ui_thread
 from .player import MpvPlayer
 from .theme import ACCENT, FG, FG_DIM, FocusLabel, PANEL_HI, tv_font
 
 CHROME_BG = "#0B0F1C"   # 顶栏/控制栏底色（近黑，覆在视频上）
+
+
+def extract_epg_url(text):
+    """从 m3u 头提取节目单地址（对应原版 extractLiveTextEpg：
+    x-tvg-url / tvg-url / url-tvg）"""
+    for line in (text or "").splitlines():
+        line = line.strip().lstrip("\ufeff")
+        if not line.upper().startswith("#EXTM3U"):
+            continue
+        for key in ("x-tvg-url", "tvg-url", "url-tvg"):
+            m = re.search(key + r'\s*=\s*"([^"]+)"', line, re.I)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+    return ""
 
 
 def read_live_source(url):
@@ -38,6 +53,10 @@ def parse_live_source(text, url=""):
     if url:
         base = os.path.basename(str(url).split("?")[0].replace("\\", "/"))
         name = os.path.splitext(base)[0]
+    # 直播源自带节目单地址（m3u 头），对应原版 parseLiveText → EPG_URL
+    epg_addr = extract_epg_url(text)
+    if epg_addr:
+        hawk.put(hawk.EPG_URL, epg_addr)
     s = text.lstrip("\ufeff \r\n\t")
     if s.startswith("{"):
         cfg = apiconfig.extract_json(s)
@@ -54,6 +73,9 @@ def parse_live_source(text, url=""):
                     u = str(l.get("url") or l.get("api") or "").strip()
                     if not u or "127.0.0.1" in u or "localhost" in u:
                         continue
+                    live_epg = str(l.get("epg") or "").strip()
+                    if live_epg:
+                        hawk.put(hawk.EPG_URL, live_epg)   # 对应 lives[].epg
                     try:
                         chs = _parse_live_text(read_live_source(u))
                     except Exception:
@@ -147,7 +169,7 @@ class Page(tk.Frame):
     """
 
     TOP_H = 46         # 顶部常驻状态栏高度
-    BAR_H = 62         # 底部悬浮控制栏高度
+    BAR_H = 110        # 底部悬浮控制栏高度（节目单行 + 按钮行）
     GROUP_W = 176      # 一级：分组列宽
     CH_W = 300         # 二级：频道列宽
     HIDE_MS = 5000     # 列表空闲自动隐藏
@@ -168,6 +190,9 @@ class Page(tk.Frame):
         self._digits = ""
         self._digit_job = None
         self._clock_job = None
+        self._epg_seq = 0       # 节目单请求序号（防切台串台）
+        self._epg_job = None
+        self._epg_progs = []
         self._visible = True
 
         # 全屏沉浸（对应 LivePlayActivity 全屏）
@@ -195,7 +220,9 @@ class Page(tk.Frame):
                             font=tv_font(40, True))
         self.big.place(relx=0.985, y=self.TOP_H + 14, anchor="ne")
 
-        # 底部悬浮控制栏（对应 backcontroller：上一台/暂停/下一台/换源/列表/全屏/退出）
+        # 底部悬浮控制栏（对应 backcontroller：上一行节目单 + 一行按钮）。
+        # 节目单并入控制栏：单独的面板会被 mpv 视频窗口持续压住（实测），
+        # 而控制栏本身显示稳定
         self.bottom = tk.Frame(self, bg=CHROME_BG)
         self._bottom_widgets(self.bottom)
         self.bottom.lift()
@@ -246,10 +273,33 @@ class Page(tk.Frame):
         self.clock.pack(side="right", padx=14)
 
     def _bottom_widgets(self, b):
-        """底部悬浮控制栏：等价于原版 backcontroller 的可操作入口（右对齐，
-        左侧留给频道列表，避免两层面板互相遮挡）"""
+        """底部悬浮控制栏：上一行节目单（对应 ll_epg：台号+台名+当前/下一节目），
+        下一行操作按钮（对应 backcontroller）；按钮右对齐，左侧留给频道列表"""
+        # ---- 节目单行 ----
+        epg_row = tk.Frame(b, bg=CHROME_BG)
+        epg_row.pack(fill="x", pady=(4, 0))
+        self.num_lbl = tk.Label(epg_row, text="", bg=CHROME_BG, fg=ACCENT,
+                                font=tv_font(24, True), width=3, anchor="e")
+        self.num_lbl.pack(side="left", padx=(16, 8))
+        left = tk.Frame(epg_row, bg=CHROME_BG)
+        left.pack(side="left")
+        self.epg_name = tk.Label(left, text="", bg=CHROME_BG, fg=FG,
+                                 font=tv_font(13, True), anchor="w")
+        self.epg_name.pack(anchor="w")
+        self.epg_src = tk.Label(left, text="", bg=CHROME_BG, fg=FG_DIM,
+                                font=tv_font(9), anchor="w")
+        self.epg_src.pack(anchor="w")
+        right = tk.Frame(epg_row, bg=CHROME_BG)
+        right.pack(side="left", padx=24)
+        self.epg_cur = tk.Label(right, text="", bg=CHROME_BG, fg=FG,
+                                font=tv_font(12), anchor="w")
+        self.epg_cur.pack(anchor="w")
+        self.epg_next = tk.Label(right, text="", bg=CHROME_BG, fg=FG_DIM,
+                                 font=tv_font(10), anchor="w")
+        self.epg_next.pack(anchor="w")
+        # ---- 按钮行 ----
         row = tk.Frame(b, bg=CHROME_BG)
-        row.pack(side="right", padx=14)
+        row.pack(side="bottom", anchor="e", padx=14, pady=(2, 8))
         self.pause_btn = self._bar_btn(row, "⏸ 暂停", self._toggle_pause)
         self._bar_btn(row, "⏮ 上一台", lambda: self._step_channel(-1))
         self._bar_btn(row, "⏭ 下一台", lambda: self._step_channel(1))
@@ -261,7 +311,7 @@ class Page(tk.Frame):
     def _bar_btn(self, parent, text, cb, accent=False):
         w = FocusLabel(parent, text=text, font=tv_font(12), bg=ACCENT if accent else PANEL_HI,
                        fg="#FFFFFF", on_select=cb, padx=14, pady=6)
-        w.pack(side="left", padx=5, pady=12)
+        w.pack(side="left", padx=5, pady=4)
         return w
 
     def _tick_clock(self):
@@ -278,7 +328,8 @@ class Page(tk.Frame):
             self._place_overlay()
 
     def _place_overlay(self):
-        h = max(120, (self.winfo_height() or 720) - self.TOP_H)
+        # 底部给控制栏（节目单 + 按钮）留位，列表不会被压住
+        h = max(120, (self.winfo_height() or 720) - self.TOP_H - self.BAR_H)
         self.overlay.place(x=0, y=self.TOP_H, width=self.GROUP_W + self.CH_W,
                            height=h, relheight=0)
         self.overlay.lift()
@@ -409,8 +460,10 @@ class Page(tk.Frame):
         self._ch_btns = []
         chs = [c for c in self.channels if c[0] == group]
         for i, c in enumerate(chs):
+            # 编号用全局台号（与数字键选台一致，对应原版 selectedChannelNumber）
+            num = self.ch_number(c)
             b = FocusLabel(self.ch_inner,
-                           text=f"{'▶' if self._is_cur(c) else '　'} {i + 1:>3}  {c[1]}",
+                           text=f"{'▶' if self._is_cur(c) else '　'} {num:>3}  {c[1]}",
                            bg="#141B33", fg=FG, font=tv_font(11),
                            padx=10, pady=6, anchor="w")
             b.configure(on_select=None)
@@ -434,6 +487,13 @@ class Page(tk.Frame):
     def _is_cur(self, c):
         return bool(self.cur_ch) and self.cur_ch[1] == c[1] and self.cur_ch[0] == c[0]
 
+    def ch_number(self, c):
+        """频道台号（全局序号，1 起；对应原版 LiveChannelItem 的序号）"""
+        try:
+            return self.channels.index(c) + 1
+        except ValueError:
+            return 0
+
     def _mark_current(self):
         """刷新二级列表当前频道标记（不重建控件，避免丢焦点）"""
         for b, c in self._ch_btns:
@@ -454,6 +514,7 @@ class Page(tk.Frame):
             self.update_idletasks()
             if not self.player:
                 self.player = MpvPlayer(self.video.winfo_id())
+                self._raise_chrome()   # mpv 视频窗口会盖住后 place 的面板，必须重置 z 序
             self.player.play(u)
         except Exception as e:
             self.status.configure(text=f"播放失败：{e}")
@@ -462,8 +523,80 @@ class Page(tk.Frame):
         extra = f" · 线路 {self.cur_src + 1}/{len(srcs)}" if len(srcs) > 1 else ""
         self.status.configure(text=f"{g} · {n} · {src_name}{extra}")
         hawk.put(hawk.LIVE_CHANNEL, {"group": g, "name": n})  # 记忆上次频道
+        # 底部节目单条：台号 + 台名 + 线路（对应 ll_epg / channelinfo）
+        self.num_lbl.configure(text=f"{self.ch_number(ch):02d}" if self.ch_number(ch) else "")
+        self.epg_name.configure(text=n)
+        self.epg_src.configure(text=f"{g} · {src_name}{extra}")
         self._mark_current()
+        self._load_epg(ch)
         self._reset_hide()
+
+    # ------------------------------------------------ 节目单 ----
+    def _load_epg(self, ch):
+        """后台拉取节目单（对应原版 getEpg），切台后更新底部两条节目"""
+        self._epg_seq += 1
+        seq, name = self._epg_seq, ch[1]
+        self.epg_cur.configure(text="节目单加载中...", fg=FG_DIM)
+        self.epg_next.configure(text="")
+
+        def run():
+            progs = []
+            try:
+                progs = epg.load(name)
+            except Exception:
+                pass
+            cur, nxt = epg.current_next(progs)
+            ui_thread.run(lambda: self._show_epg(seq, progs, cur, nxt))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _show_epg(self, seq, progs, cur, nxt):
+        """渲染当前/下一节目（对应原版 showBottomEpg）"""
+        if seq != self._epg_seq:      # 已切到别的台，丢弃过期结果
+            return
+        self._epg_progs = progs or []
+        self._schedule_epg_tick()
+        if not progs:
+            self.epg_cur.configure(text="暂无节目单（可在直播源 m3u 头配置 x-tvg-url）",
+                                   fg=FG_DIM)
+            self.epg_next.configure(text="")
+            return
+        if cur:
+            self.epg_cur.configure(
+                text=f"▶ {cur['title']}  {epg.hhmm(cur['start'])}-{epg.hhmm(cur['stop'])}",
+                fg=FG)
+        else:
+            self.epg_cur.configure(text="当前时段暂无节目信息", fg=FG_DIM)
+        if nxt:
+            self.epg_next.configure(
+                text=f"下一个 {nxt['title']}  {epg.hhmm(nxt['start'])}-{epg.hhmm(nxt['stop'])}")
+        else:
+            self.epg_next.configure(text="")
+
+    def _raise_chrome(self):
+        """把 UI 面板重新置顶：mpv 的视频子窗口创建后会把自己顶到 z 序最上，
+        盖住晚于它显示的面板（节目单条因此整条被盖）"""
+        self.top.lift()
+        if self._visible:
+            self.bottom.lift()
+            self.overlay.lift()
+        self.update_idletasks()
+
+    def _schedule_epg_tick(self):
+        """节目到点自动换行（每分钟用已取到的节目单重算，不再发请求）"""
+        if self._epg_job:
+            try:
+                self.after_cancel(self._epg_job)
+            except Exception:
+                pass
+        self._epg_job = self.after(60000, self._epg_tick)
+
+    def _epg_tick(self):
+        self._epg_job = None
+        if self._epg_progs and self.cur_ch:
+            cur, nxt = epg.current_next(self._epg_progs)
+            self._show_epg(self._epg_seq, self._epg_progs, cur, nxt)
+        else:
+            self._schedule_epg_tick()
 
     def _switch_source(self):
         """换源（对应 playNextSource）"""
@@ -732,13 +865,13 @@ class Page(tk.Frame):
             except Exception:
                 pass
         self._app_binds = []
-        for job in (self._hide_job, self._digit_job, self._clock_job):
+        for job in (self._hide_job, self._digit_job, self._clock_job, self._epg_job):
             if job:
                 try:
                     self.after_cancel(job)
                 except Exception:
                     pass
-        self._hide_job = self._digit_job = self._clock_job = None
+        self._hide_job = self._digit_job = self._clock_job = self._epg_job = None
         try:
             self.app.attributes("-fullscreen", self._was_full)
         except Exception:
