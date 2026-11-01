@@ -1,11 +1,16 @@
-# TVBox4Win — TVBox Windows 桌面复刻（Python 版）
+# TVBox4Win — TVBox 桌面复刻（Python 版，Windows + macOS）
 
-**TVBox4Win** = TVBox **for** Windows：把安卓 TV 上流行的影视聚合播放器 TVBox 完整搬到 Windows 桌面。
+**TVBox4Win**：把安卓 TV 上流行的影视聚合播放器 TVBox 完整搬到桌面。
 
 当前版本：**v0.9.5**（版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
 
-把安卓 TV 上流行的影视聚合播放器 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 复刻到 Windows 桌面：
-**Python 3 + tkinter + libmpv** 实现，单文件 EXE 即可运行，UI 与交互按原版逐页对齐。
+把安卓 TV 上流行的影视聚合播放器 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 复刻到桌面：
+**Python 3 + tkinter** 实现，UI 与交互按原版逐页对齐。同一份代码支持两个平台：
+
+| 平台 | 播放内核 | 产物 |
+|---|---|---|
+| **Windows** | libmpv（`libmpv-2.dll`） | 单文件 `TVBox4Win.exe` |
+| **macOS** 🆕 | AVFoundation（系统自带），可选 mpv | `TVBox4Win.app` |
 
 > 本项目仅供学习交流，请勿用于商业用途。影片数据均来自用户自行配置的第三方接口，与本项目无关。
 
@@ -28,6 +33,31 @@
 > | Jar 爬虫站点（最常见） | **需安装 JDK/JRE 17+** |
 >
 > 建议两个都装上：`Node.js` + `JDK 17+`，这样绝大多数接口配置里的源都能正常打开。
+
+## 🍎 macOS 版（新增）
+
+同一份代码原生跑在 Apple Silicon / Intel Mac 上，产物是 `TVBox4Win.app`——**双击即用，无需安装 Python，也无需 libmpv**。
+
+1. 从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载 `TVBox4Win-macos-arm64.zip`
+2. 解压得到 `TVBox4Win.app`，拖进「应用程序」
+3. 首次打开若被 Gatekeeper 拦截：**右键 → 打开**；或执行
+   `xattr -dr com.apple.quarantine /Applications/TVBox4Win.app`
+
+### 和 Windows 版的差异
+
+| 项目 | Windows | macOS |
+|---|---|---|
+| 播放内核 | libmpv（`libmpv-2.dll`，嵌入 tkinter 子窗口） | AVFoundation（系统自带） |
+| 画面呈现 | 内嵌在播放页里 | 无边框置顶窗口，实时跟随播放页的视频区域 |
+| 支持格式 | 全格式（mpv 解码） | m3u8 / mp4 / mov / m4v；**mkv、avi 播不了** |
+| 全格式兜底 | 默认 | 装了 mpv（`brew install mpv`）会自动优先用 mpv 后端 |
+| Jar 爬虫源 | 需 JDK 17+ | 同左；**没装 JDK 时自动跳过 jar 源，改用 CMS 源**（不会一进来就报错） |
+| JS 爬虫源 | 需 Node.js | 同左（已补充 macOS 下的 node 路径查找） |
+| 数据目录 | EXE 同目录 | `~/Library/Application Support/TVBox4Win` |
+
+> **为什么不用 mpv 嵌入？** macOS 的 mpv cocoa 视频输出不支持 `wid` 嵌入（只有 X11 / win32 支持），
+> Windows 那套「把 libmpv 塞进 tkinter 子窗口」在 Mac 上不成立。因此画面放在独立的无边框置顶窗口里，
+> 位置实时对齐播放页的视频区域（自动扣掉顶栏 / 底栏），页面自绘的控制栏既不被遮挡、也仍可点击。
 
 ### 📚 版本历史（每个版本独立打包，互不覆盖）
 
@@ -84,6 +114,8 @@
 
 **libmpv 获取方式**：从 [shinchiro/mpv-winbuild-cmake releases](https://github.com/shinchiro/mpv-winbuild-cmake/releases) 下载 `mpv-dev-x86_64-*-git-*.7z`，解压出 `libmpv-2.dll` 放入 `tvboxpy/third_party/mpv/`（`include/` 头文件已随仓库提供，无需下载）。
 
+**macOS 依赖不同**：不需要 `python-mpv` 和 `libmpv`，播放走系统 AVFoundation，只需 `requests` + `Pillow` + `pyobjc-framework-Cocoa` + `pyobjc-framework-AVFoundation`（见下文命令）。
+
 ---
 
 ## 🚀 从源码运行
@@ -110,6 +142,39 @@ python build_exe.py
 
 **运行资产下载**：Jar 爬虫运行时不入库，可从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载 `tvboxpy-runtime-assets.zip`，解压到 EXE 同目录即可（包含 `jvmrt/` 与 `dex-tools-v2.4/`）。
 
+## 🍏 从源码运行（macOS）
+
+```bash
+cd tvboxpy
+python3 -m venv ../.venv && ../.venv/bin/python -m pip install \
+  requests Pillow pyobjc-framework-Cocoa pyobjc-framework-AVFoundation
+
+../.venv/bin/python main.py              # 使用内置默认接口
+../.venv/bin/python main.py <配置URL>     # 指定接口
+```
+
+> Python 必须自带可用的 Tcl/Tk。macOS 系统自带的 3.9（Tk 8.5）能用但偏旧；
+> 推荐 python.org 安装包或 `uv python install 3.12`（自带 Tcl/Tk 9.0）。
+
+## 🍏 打包 .app（macOS）
+
+```bash
+cd tvboxpy
+./build_mac.sh          # 装依赖 → 生成 icns → PyInstaller 打包 → 冒烟自检
+./build_mac.sh --run    # 打包完成直接启动
+```
+
+产物：`dist/TVBox4Win.app`（arm64，约 47MB）。
+
+**冒烟自检**：打包链路内置一段真实播放校验，会拉起窗口播一段 HLS 测试流并验证 seek：
+
+```bash
+dist/TVBox4Win.app/Contents/MacOS/TVBox4Win --smoke
+# player_backend: av / position: 6.0 / duration: 634.6 / decode_ok: YES / seek_ok: YES
+```
+
+更多移植细节见 [`tvboxpy/README-mac.md`](tvboxpy/README-mac.md)。
+
 ## 📁 目录结构
 
 ```
@@ -119,7 +184,9 @@ tvbox2exe/
 │   ├── tvboxosc/             # 应用源码
 │   │   ├── app.py            #   主窗口与页面路由
 │   │   ├── ui_*.py           #   主页/搜索/详情/播放/设置/收藏/历史/直播/推送
-│   │   ├── player.py         #   libmpv 封装（核心预热复用、断点续播、倍速）
+│   │   ├── player.py         #   播放器门面（按平台分发后端、断点续播、倍速）
+│   │   ├── player_av.py      #   macOS 播放后端：AVFoundation
+│   │   ├── player_mac.py     #   macOS 可选播放后端：mpv 子进程 + JSON IPC
 │   │   ├── data_api.py       #   CMS 接口 + 播放地址解析/页面嗅探
 │   │   ├── spider.py         #   spider 分发（js/py/jar）
 │   │   ├── spider_runtime/   #   JS 爬虫运行时（drpy.js + Node bridge）
@@ -130,8 +197,12 @@ tvbox2exe/
 │   │   └── theme.py / imgcache.py  # 暗色主题 / 海报缓存
 │   ├── third_party/mpv/      # libmpv 开发库（dll 不入库，见上文获取方式）
 │   ├── tests/                # 自动化验证脚本（EXE 像素级 UI 回归测试）
-│   ├── build_exe.py          # 一键打包脚本
-│   └── tvboxpy.spec          # PyInstaller 配置
+│   ├── build_exe.py          # 一键打包脚本（Windows）
+│   ├── tvboxpy.spec          # PyInstaller 配置（Windows）
+│   ├── build_mac.sh          # 一键打包脚本（macOS）
+│   ├── tvboxpy_mac.spec      # PyInstaller 配置（macOS，含 ATS 放行）
+│   ├── rthook_tcl.py         # macOS 打包运行时钩子（Tcl/Tk 9 路径）
+│   └── README-mac.md         # macOS 移植说明与已知限制
 ├── reference/                # 开发时对齐 UI/交互所参照的原版安卓源码
 │   ├── app/                  #   TVBoxOSC fork 主工程（版权归原项目所有）
 │   ├── player/               #   ijkplayer 源码
@@ -160,7 +231,9 @@ main.py 启动
        ├─ type 3 py 站点 ──► Python 内置基类动态加载
        └─ type 3 jar 站点 ─► dex→jar 转换（md5 缓存）→ JVM 桥 SpiderRunner
             └─ 统一接口：home/category/detail/search/playerContent
-播放 ──► ui_play 后台解析地址 → libmpv（悬浮控制栏 + 断点续播 + 自动连播）
+播放 ──► ui_play 后台解析地址 → 播放器（悬浮控制栏 + 断点续播 + 自动连播）
+         ├─ Windows：libmpv（libmpv-2.dll，wid 嵌入播放页）
+         └─ macOS：AVFoundation（独立置顶窗口跟随播放页视频区域）
 ```
 
 ## ❓ 常见问题
@@ -170,6 +243,14 @@ main.py 启动
 - **JS 站点报「未找到 node 运行时」**：安装 Node.js 并确保 `node` 在 PATH 中。
 - **Jar 站点报「未找到 java 运行时」**：安装 JDK 17+ 并确保 `java` 在 PATH 中；从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载运行资产包解压到 EXE 同目录。
 - **播放黑屏**：多为该源地址失效，切换线路或换站点；可在设置中尝试软解码。
+
+**macOS 专属**
+
+- **提示「无法打开，因为 Apple 无法检查其是否包含恶意软件」**：未做 Apple 公证。右键 → 打开，或 `xattr -dr com.apple.quarantine /Applications/TVBox4Win.app`。
+- **部分影片黑屏 / 只有声音**：该片是 mkv、avi 等 AVFoundation 不支持的容器。换 mp4/m3u8 的线路，或 `brew install mpv` 后重启应用（会自动切到 mpv 后端，支持全格式）。
+- **想用 jar 爬虫源**：装 JDK 17+（`brew install openjdk@17`）即可，应用会自动识别。
+- **播放时画面盖住界面 / 位置错位**：画面是独立置顶窗口，进出全屏时会自动重新对齐；若出现错位，切一下页面（Esc 返回再进）即可恢复。
+- **数据在哪**：`~/Library/Application Support/TVBox4Win`（`hawk.json` 配置、`tvbox.db` 历史、`error.log` 排查日志）。
 
 ## 📜 致谢与声明
 
