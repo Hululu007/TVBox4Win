@@ -4,7 +4,7 @@ import tkinter as tk
 
 from tvboxosc import hawk, apiconfig, ui_thread
 from tvboxosc.app import App
-from tvboxosc.theme import tv_font
+from tvboxosc.theme import FocusLabel, tv_font
 from tvboxosc.ui_user import UserFragment
 from tvboxosc.ui_user import PlaceholderPage
 
@@ -161,15 +161,59 @@ def main():
     import threading
     threading.Thread(target=_warmup, daemon=True).start()
 
-    loading = tk.Label(app.container, text="TVBox\n正在加载接口配置...",
-                       bg="#000000", fg="#FFFFFF", font=tv_font(18))
+    # 启动页：加载失败时留在本页给「重试 / 更换配置」，而不是让人重启程序
+    loading = tk.Frame(app.container, bg="#000000")
     loading.pack(fill="both", expand=True)
+    box = tk.Frame(loading, bg="#000000")
+    box.place(relx=0.5, rely=0.42, anchor="center")
+    tk.Label(box, text="TVBox", bg="#000000", fg="#FFFFFF",
+             font=tv_font(26, True)).pack(pady=(0, 14))
+    tip = tk.Label(box, text="正在加载接口配置...", bg="#000000", fg="#BFBFBF",
+                   font=tv_font(14), justify="center", wraplength=720)
+    tip.pack()
+    actions = tk.Frame(box, bg="#000000")
+    # takefocus：Label 默认不参与 Tab 遍历，键盘用户会卡在「重试」上
+    btn_retry = FocusLabel(actions, text="重试", bg="#1C1C1C", fg="#FFFFFF",
+                           font=tv_font(12), on_select=lambda: _retry(),
+                           takefocus=1)
+    btn_retry.pack(side="left", padx=(0, 20))
+    FocusLabel(actions, text="更换配置", bg="#1C1C1C", fg="#FFFFFF",
+               font=tv_font(12), on_select=lambda: _change_config(),
+               takefocus=1).pack(side="left")
+
+    state = {"url": cfg_url, "save_default": False}
 
     def _loading_alive():
         try:
             return bool(loading.winfo_exists())
         except Exception:
             return False
+
+    def _show_actions(show):
+        if not _loading_alive():
+            return
+        if show:
+            actions.pack(pady=(18, 0))
+            btn_retry.focus_set()
+        else:
+            actions.pack_forget()
+
+    def _enter():
+        try:
+            if not app.winfo_exists():   # 缓存提示延迟期间用户可能已关窗
+                return
+        except Exception:
+            return
+        if _loading_alive():
+            loading.destroy()
+        if hawk.get("home_page", "vod") == "live":
+            # 设置页「下次进入」选了直播：启动直达直播页
+            from tvboxosc.ui_live import Page as LivePage
+            app.switch(LivePage)
+        else:
+            # 对应原版 HomeActivity 默认 tab：启动直达点播首页（GridFragment）
+            from tvboxosc.ui_grid import Page as GridPage
+            app.switch(GridPage)
 
     def on_ok():
         # 直接进界面，绝不做站点探测（探测太慢，用户等着急）
@@ -186,16 +230,19 @@ def main():
             if new_key and new_key != key:
                 key = new_key
                 hawk.put(hawk.HOME_SOURCE, key)
-        if _loading_alive():
-            loading.destroy()
-        if hawk.get("home_page", "vod") == "live":
-            # 设置页「下次进入」选了直播：启动直达直播页
-            from tvboxosc.ui_live import Page as LivePage
-            app.switch(LivePage)
+        if state["save_default"]:
+            hawk.put(hawk.DEFAULT_API, state["url"])
+            state["save_default"] = False
+        if not _loading_alive():
+            _enter()
+            return
+        if apiconfig.api_config.last_from_cache:
+            # 网络挂了但缓存可用：明确告知来源，短暂停留后自动进入
+            _show_actions(False)
+            tip.configure(text="网络不可用，正在使用上次缓存的配置…")
+            loading.after(1200, _enter)
         else:
-            # 对应原版 HomeActivity 默认 tab：启动直达点播首页（GridFragment）
-            from tvboxosc.ui_grid import Page as GridPage
-            app.switch(GridPage)
+            _enter()
 
     def on_err(msg):
         if not _loading_alive():
@@ -203,10 +250,76 @@ def main():
             from tvboxosc.paths import log_error
             log_error("[main] 配置加载失败", msg)
             return
-        ui_thread.run(lambda: loading.configure(
-            text=f"配置加载失败：{msg}\n请检查网络后重启"))
+        tip.configure(text=f"配置加载失败\n{msg}")
+        _show_actions(True)
 
-    apiconfig.api_config.load(cfg_url, on_ok, on_err)
+    def _start(url, note="正在加载接口配置..."):
+        state["url"] = url
+        if not _loading_alive():
+            return
+        tip.configure(text=note)
+        _show_actions(False)
+        apiconfig.api_config.load(url, on_ok, on_err)
+
+    def _retry():
+        _start(state["url"], note="正在重新加载配置...")
+
+    def _change_config():
+        from tkinter import filedialog
+        win = tk.Toplevel(app)
+        win.title("更换接口配置")
+        win.configure(bg="#000000")
+        win.transient(app)
+        win.grab_set()
+        tk.Label(win, text="配置地址（支持 http / clan:// / 本地文件，"
+                           "加密配置可带 ;pk;密钥）",
+                 bg="#000000", fg="#BFBFBF", font=tv_font(10)
+                 ).pack(padx=20, pady=(14, 4), anchor="w")
+        row = tk.Frame(win, bg="#000000")
+        row.pack(fill="x", padx=20)
+        ent = tk.Entry(row, bg="#1C1C1C", fg="#FFFFFF", font=("Consolas", 11),
+                       insertbackground="#FFFFFF", highlightthickness=1,
+                       highlightbackground="#333", width=56)
+        ent.insert(0, state["url"])
+        ent.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        def browse():
+            p = filedialog.askopenfilename(
+                parent=win, title="选择配置文件",
+                filetypes=[("配置文件", "*.json *.txt"), ("所有文件", "*.*")])
+            if p:
+                ent.delete(0, "end")
+                ent.insert(0, p)
+
+        FocusLabel(row, text="浏览", bg="#1C1C1C", fg="#FFFFFF", font=tv_font(10),
+                   on_select=browse, takefocus=1).pack(side="left")
+
+        def confirm(_e=None):
+            u = ent.get().strip()
+            if not u:
+                return
+            state["save_default"] = True
+            win.destroy()
+            _start(u, note="正在加载新配置...")
+
+        bar = tk.Frame(win, bg="#000000")
+        bar.pack(fill="x", padx=20, pady=(14, 12))
+        FocusLabel(bar, text="确定", bg="#FFB300", fg="#000000",
+                   font=tv_font(11, True), on_select=confirm,
+                   takefocus=1).pack(side="right")
+        FocusLabel(bar, text="取消", bg="#1C1C1C", fg="#FFFFFF", font=tv_font(10),
+                   on_select=win.destroy, takefocus=1).pack(side="right", padx=(0, 8))
+        ent.bind("<Return>", confirm)
+        win.bind("<Escape>", lambda e: win.destroy())
+        # Toplevel 默认位置可能落到屏幕外（主窗被移到别处时），显式居中
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = app.winfo_rootx() + (app.winfo_width() - w) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - h) // 3
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        ent.focus_set()
+
+    _start(cfg_url)
     app.mainloop()
 
 

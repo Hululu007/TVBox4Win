@@ -1,15 +1,19 @@
 """ApiConfig 复刻（对应 api/ApiConfig.java + bean/SourceBean.java + bean/ParseBean.java）"""
+import base64
 import json
 import os
 import re
 import socket
 import threading
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import requests
 
 from . import hawk
+from .aeslite import (aes_cbc_decrypt, aes_ecb_decrypt, bytes_from_hex)
 from .paths import data_path
+
+_AES_BLOCK = 16
 
 requests.packages.urllib3.disable_warnings()
 SESSION = requests.Session()
@@ -122,11 +126,165 @@ def apply_host_mapping(url, header=None):
 
 
 
+def _is_http_url(url):
+    return isinstance(url, str) and url.startswith(("http://", "https://"))
+
+
+_DRIVE_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/)")
+
+
+def local_path_of(url):
+    """本地配置文件路径：file:// / clan://localhost/ / Windows 绝对路径 / 已存在的文件"""
+    u = str(url or "").strip()
+    if not u:
+        return None
+    if u.startswith("clan://localhost/"):
+        p = unquote(u[len("clan://localhost/"):])
+        if re.match(r"^[\\/][A-Za-z]:", p):
+            p = p[1:]
+        p = p.replace("/", os.sep)
+        return p if os.path.isabs(p) else data_path(p)
+    if u.startswith("file://"):
+        p = unquote(u[len("file://"):])
+        if re.match(r"^[\\/][A-Za-z]:", p):
+            p = p[1:]
+        p = p.replace("/", os.sep)
+        return p if os.path.isabs(p) else data_path(p)
+    if _DRIVE_RE.match(u) or (not _is_http_url(u) and os.path.isfile(u)):
+        return u
+    return None
+
+
 def clan_to_address(url):
-    """clan:// 协议转换（对应 Java clanToAddress）：clan://host/path → http://host/path"""
-    if url.startswith("clan://"):
-        return "http://" + url[7:]
-    return url
+    """clan:// 协议（对应 Java clanToAddress）
+
+    clan://localhost/x → 本地文件（桌面端没有原版的 /file/ HTTP 服务）
+    clan://host/dir/x → http://host/file/dir/x
+    """
+    u = str(url or "")
+    if u.startswith("clan://localhost/"):
+        return local_path_of(u) or u
+    if u.startswith("clan://"):
+        rest = u[len("clan://"):]
+        host, sep, path = rest.partition("/")
+        return ("http://" + host + "/file/" + path) if sep else ("http://" + host + "/file/")
+    return u
+
+
+def config_address(api_url):
+    """对应 Java configUrl()：返回 (实际请求地址, configKey)
+
+    支持 http(s)、clan://、file://、本地路径，以及 `;pk;密钥` 后缀。
+    """
+    url = str(api_url or "").strip().replace("file://", "clan://localhost/")
+    config_key = None
+    if ";pk;" in url:
+        parts = url.split(";pk;")
+        base, config_key = parts[0], (parts[1] if len(parts) > 1 else "")
+        if base.startswith("clan"):
+            addr = clan_to_address(base)
+        elif base.startswith("http"):
+            addr = base
+        elif local_path_of(base):
+            addr = base
+        else:
+            addr = "http://" + base
+    elif url.startswith("clan"):
+        addr = clan_to_address(url)
+    elif local_path_of(url):
+        addr = url
+    elif not url.startswith("http"):
+        addr = "http://" + url
+    else:
+        addr = url
+    return addr, config_key
+
+
+def resolve_ref(base_url, ref):
+    """配置里的相对路径（./ ../）按配置地址解析（对应 Java fixContentPath）"""
+    if not isinstance(ref, str) or not ref.startswith(("./", "../")):
+        return ref
+    if _is_http_url(base_url):
+        return urljoin(base_url, ref)
+    base_path = local_path_of(base_url)
+    if base_path:
+        return os.path.normpath(os.path.join(
+            os.path.dirname(base_path), ref.replace("/", os.sep)))
+    return ref
+
+
+def clan_content_fix(api_url, content):
+    """远程 clan 配置：内容里的 clan://localhost/、file:// 指向配置同源的 /file/"""
+    u = str(api_url or "")
+    if not content or not u.startswith("clan://") or u.startswith("clan://localhost/"):
+        return content
+    addr = clan_to_address(u)
+    idx = addr.find("/file/")
+    if idx < 0:
+        return content
+    fix = addr[:idx + 6]
+    return content.replace("clan://localhost/", fix).replace("file://", fix)
+
+
+def _right_pad(text, ch, length):
+    """对应 Java AES.rightPadding：去掉首尾空白，超长截断，不足补 ch"""
+    s = str(text or "").strip()
+    return s[:length] if len(s) >= length else s + ch * (length - len(s))
+
+
+def _b64decode(text):
+    s = re.sub(r"\s+", "", text or "")
+    s += "=" * (-len(s) % 4)
+    try:
+        raw = base64.b64decode(s)
+    except (ValueError, TypeError):
+        raw = base64.urlsafe_b64decode(s)
+    return raw.decode("utf-8", "replace")
+
+
+def _is_json_object(text):
+    try:
+        return isinstance(json.loads(text), dict)
+    except (ValueError, TypeError):
+        return False
+
+
+def _decode_2423(content):
+    """2423 格式：hex( "$#" + key + "#$" + ciphertext + iv13 )，AES-CBC 解密"""
+    hexstr = re.sub(r"\s+", "", content)
+    raw = bytes_from_hex(hexstr)
+    marker = raw.find(b"#$", 2)
+    if marker < 2 or len(raw) - marker - 2 - 13 < _AES_BLOCK:
+        return None
+    cipher = raw[marker + 2:-13]
+    key = _right_pad(raw[2:marker].decode("utf-8", "replace").lower(), "0", 16)
+    iv = _right_pad(raw[-13:].decode("utf-8", "replace").lower(), "0", 16)
+    plain = aes_cbc_decrypt(cipher, key.encode("utf-8"), iv.encode("utf-8"))
+    return plain.decode("utf-8", "replace")
+
+
+def decode_config(text, config_key=None):
+    """对应 ApiConfig.FindResult：Base64 包裹 / 2423+AES-CBC / ;pk;+AES-ECB"""
+    if not text:
+        return text
+    try:
+        if _is_json_object(text):
+            return text
+        content = text
+        m = re.search(r"[A-Za-z0-9]{8}\*\*", content)
+        if m:
+            content = _b64decode(content[m.start() + 10:])
+        content = content.strip()
+        if content.startswith("2423"):
+            decoded = _decode_2423(content)
+            return decoded if decoded is not None else text
+        if config_key is not None and not _is_json_object(content):
+            key = _right_pad(config_key, "0", 16)
+            plain = aes_ecb_decrypt(bytes_from_hex(content), key.encode("utf-8"))
+            return plain.decode("utf-8", "replace")
+        return content
+    except Exception:
+        return text
 
 
 def is_ad_host(url):
@@ -246,6 +404,14 @@ class ParseBean:
 
 
 def fetch_text(url, headers=None, timeout=15, retries=3):
+    local = local_path_of(url)
+    if local is not None:
+        try:
+            # utf-8-sig：Windows 记事本保存的配置常带 BOM
+            with open(local, encoding="utf-8-sig", errors="replace") as f:
+                return f.read()
+        except OSError:
+            return None
     if is_ad_host(url):
         return None
     _FALLBACK_STATUS = (403, 429, 495, 496, 497, 525, 526, 527)  # TLS 指纹被拒等
@@ -337,6 +503,7 @@ class ApiConfig:
         self.lives = []             # 直播源配置列表
         self.flags = []
         self.load_lock = threading.Lock()
+        self.last_from_cache = False
 
     def get(self, key) -> SourceBean | None:
         for b in self.source_bean_list:
@@ -360,26 +527,42 @@ class ApiConfig:
                 _ui(err_cb, "已有配置正在加载，请稍候再试")
                 return
             try:
-                req_url = clan_to_address(api_url)
-                text = fetch_text(req_url)
+                self.last_from_cache = False
+                req_url, config_key = config_address(api_url)
+                local = local_path_of(req_url)
+                if local is not None and not os.path.isfile(local):
+                    _ui(err_cb, f"配置文件不存在：{local}")
+                    return
+                text = fetch_text(req_url, timeout=12, retries=1)
+                from_net = bool(text)
+                if text:
+                    text = decode_config(text, config_key)
+                    text = clan_content_fix(api_url, text)
                 from_cache = False
-                if text and os.path.basename(req_url) not in ("", "/"):
+                if not text or extract_json(text) is None:
+                    # 回退本地缓存（对应 Java onError → readCache）
+                    try:
+                        with open(STORE_PATH, encoding="utf-8") as f:
+                            cached = f.read()
+                        if cached and extract_json(cached) is not None:
+                            text, from_cache = cached, True
+                    except OSError:
+                        pass
+                if from_net and not from_cache:
                     try:
                         with open(STORE_PATH, "w", encoding="utf-8") as f:
                             f.write(text)
                     except OSError:
                         pass
-                elif not text:
-                    # 回退本地缓存（对应 Java onError → readCache）
-                    try:
-                        with open(STORE_PATH, encoding="utf-8") as f:
-                            text = f.read()
-                        from_cache = True
-                    except OSError:
-                        text = None
                 cfg = extract_json(text) if text else None
                 if cfg is None:
-                    _ui(err_cb, "配置加载失败" + ("（已无缓存可用）" if from_cache else ""))
+                    if text:
+                        msg = "配置解析失败（格式或解密密钥不正确），且缓存也不可用"
+                    elif local is not None:
+                        msg = f"配置文件读取失败：{local}"
+                    else:
+                        msg = "配置拉取失败（网络不可达或地址无效），且没有可用缓存"
+                    _ui(err_cb, msg)
                     return
                 self._parse(cfg, req_url)
                 # 记录历史（对应 ApiHistoryDialogAdapter 数据）
@@ -398,12 +581,19 @@ class ApiConfig:
 
     def _parse(self, cfg, base_url=""):
         self.spider = cfg.get("spider")
-        if base_url and isinstance(self.spider, str) and self.spider.startswith(("./", "../")):
-            from urllib.parse import urljoin
-            self.spider = urljoin(base_url, self.spider)
+        if isinstance(self.spider, str):
+            self.spider = resolve_ref(base_url, self.spider)
         self.wallpaper = cfg.get("wallpaper")
+        if isinstance(self.wallpaper, str):
+            self.wallpaper = resolve_ref(base_url, self.wallpaper)
         self.flags = cfg.get("flags") or []
         self.lives = cfg.get("lives") or []
+        for live in self.lives:
+            if not isinstance(live, dict):
+                continue
+            for k in ("url", "api", "jar", "ext", "epg"):
+                if isinstance(live.get(k), str):
+                    live[k] = resolve_ref(base_url, live[k])
         # ads 域名拦截（对应 Java parseJson 尾部 AdBlocker.addAdHost）
         _AD_HOSTS.clear()
         for ad in (cfg.get("ads") or []):
@@ -417,17 +607,13 @@ class ApiConfig:
             b = SourceBean.from_json(d)
             if not b.name or not b.api:
                 continue
-            # 相对路径 js/py 爬虫按配置 base URL 解析（对应 Java URI.resolve）
-            if base_url and str(b.api).startswith(("./", "../")):
-                from urllib.parse import urljoin
-                b.api = urljoin(base_url, b.api)
-            if base_url and isinstance(b.ext, str) and b.ext.startswith(("./", "../")):
-                from urllib.parse import urljoin
-                b.ext = urljoin(base_url, b.ext)
+            # 相对路径 js/py 爬虫按配置地址解析（对应 Java fixContentPath）
+            b.api = resolve_ref(base_url, b.api)
+            if isinstance(b.ext, str):
+                b.ext = resolve_ref(base_url, b.ext)
             # jar 字段（站点级 spider jar，csp_ 类源用）
-            if base_url and isinstance(b.jar, str) and b.jar.startswith(("./", "../")):
-                from urllib.parse import urljoin
-                b.jar = urljoin(base_url, b.jar)
+            if isinstance(b.jar, str):
+                b.jar = resolve_ref(base_url, b.jar)
             self.source_bean_list.append(b)
             self.source_key_list.append(b.key)
         self.parse_bean_list = []
@@ -438,9 +624,9 @@ class ApiConfig:
                 ptype = int(d.get("type", d.get("flag", 0)) or 0)
             except (TypeError, ValueError):
                 ptype = 0
+            purl = resolve_ref(base_url, str(d.get("url", "")))
             self.parse_bean_list.append(ParseBean(
-                str(d.get("name", "")), str(d.get("url", "")),
-                d.get("ext"), ptype))
+                str(d.get("name", "")), purl, d.get("ext"), ptype))
 
     def _parse_hosts(self, cfg):
         """配置 hosts：域名=IP（对应 ApiConfig.java:856-866）"""
