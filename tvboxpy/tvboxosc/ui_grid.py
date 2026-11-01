@@ -22,6 +22,20 @@ MENU = [
 _WEEK = "一二三四五六日"
 
 
+def _friendly_error(ex):
+    """把爬虫异常转成一句话提示（原始异常仍写 error.log）"""
+    text = str(ex or "")
+    if "ClassNotFoundException" in text:
+        return "该源爬虫类缺失（上游配置可能已失效），请换一个源"
+    if "NullPointerException" in text and "Spider.init" in text:
+        return "该源爬虫初始化失败，请换一个源"
+    if "ConnectTimeout" in text or "Max retries" in text or "timed out" in text:
+        return "网络连接超时，点击重试"
+    if "spider 进程退出" in text or "JVM" in text:
+        return "爬虫进程异常，点击重试"
+    return text[:60]
+
+
 class Page(tk.Frame):
     """对应 ui/fragment/GridFragment.java"""
 
@@ -219,7 +233,7 @@ class Page(tk.Frame):
                 self.classes = data_api.get_classes(self.bean)
             except Exception as ex:
                 self.classes = []
-                self.load_err = str(ex)
+                self.load_err = _friendly_error(ex)
                 from .paths import log_error
                 log_error("get_classes 失败 bean=%s api=%s" %
                           (self.bean.name, self.bean.api), ex)

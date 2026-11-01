@@ -227,6 +227,13 @@ class JarSpider:
             ]
         self._proc = subprocess.Popen(
             [java, "-Xmx1g",
+             # 关闭字节码校验：壳守卫解密的 dex 经转换后没有 StackMapTable，
+             # HotSpot 会对带分支的方法抛 VerifyError（如 Pan.playerContent），
+             # 导致 getSpider 返回 null、Guard 类初始化 NPE。Android 的 dex
+             # 校验不依赖栈映射帧，所以原版不会触发，这里必须显式关掉。
+             "-XX:+UnlockDiagnosticVMOptions",
+             "-XX:-BytecodeVerificationRemote",
+             "-XX:-BytecodeVerificationLocal",
              # JDK 模块封装放行（Win-box 实测必需：壳混淆 VM 的反射深拷贝、
              # unidbg 反射代理 setAccessible，否则守卫握手带崩）
              "--add-opens=java.base/java.lang=ALL-UNNAMED",
