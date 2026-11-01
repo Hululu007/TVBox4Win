@@ -63,9 +63,15 @@ python main.py --check             # 打包自检：验证所有页面模块可�
 
 type 0/1 CMS 站点不走 spider，由 `data_api.py` 直连 JSON/XML 接口；播放地址解析（媒体直链直播、网页链接页面嗅探 `var main`/直链、parses 解析）也在 `data_api.py`，嗅探语义必须对齐原版 `DefaultConfig.isVideoFormat`。
 
-### 4. libmpv 播放器（player.py）
+### 4. 播放器（player.py = 薄门面 + `host/` 平台层）
 
-进程级**单例核心**：libmpv 核心反复 init/terminate 会崩溃、多实例会抢音频设备，所以整个进程共享一个 mpv core，切页时通过改 `wid` 重新嵌入新容器，terminate 只停播。启动时 `MpvPlayer.warmup()` 后台预热（省 1~2s 起播开销）。改播放逻辑时不可绕过单例假设。
+**平台差异只允许存在于 `tvboxosc/host/`**：`host/win.py`（libmpv 单例 + wid 嵌入）与 `host/mac.py`（AVFoundation / 独立 mpv 进程 + IPC，实现体在 `player_av.py` / `player_mac.py`），两者互不引用、接口一致。共享代码（`player.py`、`ui_*.py`、`spider.py`、`paths.py`、`theme.py`）**不得出现 `sys.platform` 判断**，一律经 `from .host import …` 取能力；`tests/verify_platform_isolation.py` 用 AST 静态断言这条纪律（接口一致性 + 无平台判断泄漏），改平台相关代码后必须跑它。
+
+进程级**单例核心**：libmpv 核心反复 init/terminate 会崩溃、多实例会抢音频设备，所以整个进程共享一个播放 core，切页时 Windows 改 `wid` 重嵌、macOS 重新对齐独立窗口，terminate 只停播。启动时 `MpvPlayer.warmup()` 后台预热（省 1~2s 起播开销）。改播放逻辑时不可绕过单例假设。打包时各平台 spec 用 `excludes` 排除对侧后端（Windows 排 `host.mac`，mac 排 `host.win`）。
+
+### 4.1 播放链路验证（不依赖网络）
+
+`python tests/verify_playback_backend.py`：用 mpv lavfi 本地测试信号走完整 UI 播放页（出画面/暂停/seek/倍速/切页），沙箱或断网环境也能验证播放器重构。
 
 ### 5. 持久化
 

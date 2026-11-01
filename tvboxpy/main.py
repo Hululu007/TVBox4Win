@@ -40,7 +40,6 @@ def smoke_test():
     import time
     from tvboxosc.app import App
     from tvboxosc.ui_play import Page as PlayPage
-    from tvboxosc import player as player_mod
 
     app = App()
     series = (("测试线路", ["第01集"]), [SMOKE_URL])
@@ -79,7 +78,7 @@ def smoke_test():
     # 放在最后读：刚出画面时 AVPlayer 可能还没报出总时长
     pos, dur, _ = page.player.status() if page.player else (0, 0, True)
     lines = [
-        "player_backend: %s" % getattr(player_mod, "_MAC_BACKEND", "libmpv"),
+        "player_backend: %s" % (page.player.backend_name if page.player else "-"),
         "position: %.1f" % pos,
         "duration: %.1f" % dur,
         "decode_ok: %s" % ("YES" if ok else "NO"),

@@ -1,27 +1,24 @@
 """应用数据路径：冻结（PyInstaller 单文件）时资源在临时 _MEI 目录，
 每次启动都会更换；所有需要持久化的文件必须放到固定位置。
 
-- Windows：EXE 所在目录（沿用原设计，用户习惯「绿色版」）
-- macOS：.app 内部是不可写的签名包，改放
-  ~/Library/Application Support/TVBox4Win（沙盒外仍可直接编辑）
+具体放哪由平台层决定（host/win.py · host/mac.py）：
+- Windows：EXE 所在目录（沿用「绿色版」习惯）
+- macOS：.app 内部是只读签名包，改放
+  ~/Library/Application Support/TVBox4Win
 """
 import os
 import sys
 
-IS_MAC = sys.platform == "darwin"
+from .host import app_base as _app_base
 
-if getattr(sys, "frozen", False):
-    if IS_MAC:
-        APP_BASE = os.path.join(
-            os.path.expanduser("~/Library/Application Support"), "TVBox4Win")
-        try:
-            os.makedirs(APP_BASE, exist_ok=True)
-        except OSError:
-            APP_BASE = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        APP_BASE = os.path.dirname(os.path.abspath(sys.executable))
-else:
-    APP_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_FROZEN = bool(getattr(sys, "frozen", False))
+
+APP_BASE = _app_base(
+    _FROZEN,
+    os.path.dirname(os.path.abspath(sys.executable)) if _FROZEN else "",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
+
 
 
 def resource_path(*names):

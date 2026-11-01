@@ -46,14 +46,12 @@ _FONT_FAMILY = None
 
 
 def _pick_family():
-    """跨平台中文字体：macOS 用苹方，Windows 用雅黑，都缺失时交给 Tk 默认字体"""
+    """中文字体：候选列表由平台层提供，都缺失时退回第一个候选名"""
     global _FONT_FAMILY
     if _FONT_FAMILY:
         return _FONT_FAMILY
-    import sys
-    cands = (["PingFang SC", "Hiragino Sans GB", "Heiti SC", "Songti SC"]
-             if sys.platform == "darwin"
-             else ["Microsoft YaHei UI", "Microsoft YaHei", "SimHei"])
+    from .host import font_candidates
+    cands = font_candidates()
     try:
         have = set(tkfont.families())
         for name in cands:

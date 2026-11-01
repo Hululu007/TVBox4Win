@@ -8,7 +8,6 @@ import os
 import queue
 import re
 import subprocess
-import sys
 import threading
 
 from .apiconfig import fetch_text
@@ -167,31 +166,11 @@ class Spider:
 
 
 def _find_node():
-    """找 node：GUI 启动的 .app 只有最小 PATH，所以要显式列常见安装位置"""
-    import glob
-    import shutil
-    home = os.path.expanduser("~")
-    cands = [shutil.which("node")]
-    if sys.platform == "darwin":
-        cands += [
-            "/opt/homebrew/bin/node",            # Apple Silicon Homebrew
-            "/usr/local/bin/node",               # Intel Homebrew
-            os.path.join(home, ".local/bin/node"),
-            "/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2-6/node.exe",
-        ]
-        # nvm / volta 这类版本管理器装的 node
-        for pat in (os.path.join(home, ".nvm/versions/node/*/bin/node"),
-                    os.path.join(home, ".volta/bin/node"),
-                    os.path.join(home, ".workbuddy/binaries/node/versions/*/bin/node")):
-            cands += sorted(glob.glob(pat), reverse=True)
-    else:
-        cands += [
-            r"C:\Program Files\nodejs\node.exe",
-            r"C:\Users\Administrator\.workbuddy\binaries\node\versions\22.22.2-6\node.exe",
-        ]
-    for cand in cands:
-        if cand and os.path.isfile(cand):
-            return cand
+    """找 node：候选路径由平台层提供（GUI 启动的 .app 只有最小 PATH）"""
+    from .host import node_path
+    cand = node_path()
+    if cand:
+        return cand
     raise SpiderError("未找到 node 运行时")
 
 

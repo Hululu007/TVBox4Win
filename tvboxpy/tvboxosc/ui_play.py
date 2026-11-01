@@ -341,7 +341,8 @@ class Page(tk.Frame):
             return
         # 等 video 布局完成再取 wid
         self.update_idletasks()
-        self.player = MpvPlayer(self.video, insets=(42, 0, 96, 0))
+        # 边距由平台层给出（Windows 为 0，macOS 需避开自绘控制栏）
+        self.player = MpvPlayer(self.video)
 
     def _resolve(self, url):
         """选集地址 → (真实媒体地址, 请求头)。含网络请求，须在后台线程调用"""

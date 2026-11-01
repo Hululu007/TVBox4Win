@@ -49,7 +49,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=["rthook_tcl.py"],
-    excludes=["pytest", "numpy", "matplotlib"],
+    excludes=["pytest", "numpy", "matplotlib",
+              # Windows 播放后端（host.win 延迟 import 的 python-mpv 在 mac 未装）
+              "tvboxosc.host.win", "mpv"],
     noarchive=False,
     optimize=0,
 )

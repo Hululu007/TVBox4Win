@@ -157,8 +157,7 @@ def step_cleanup():
     hawk.delete(hawk.LIVE_CHANNEL)
     try:
         from tvboxosc.player import MpvPlayer
-        if MpvPlayer._shared:
-            MpvPlayer._shared.terminate()
+        MpvPlayer.shutdown()
     except Exception:
         pass
     try:
