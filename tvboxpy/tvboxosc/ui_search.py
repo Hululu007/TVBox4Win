@@ -55,6 +55,10 @@ def match_result(name, kw):
 SUGGEST_URL = ("https://tv.aiseet.atianqi.com/i-tvbin/qtv_video/"
                "search/get_search_smart_box")
 
+# 虚拟键盘按键（对应 SearchKeyboard.java：远程搜索/删除 + A-Z + 0-9）
+KB_KEYS = (["远程搜索", "删除"] + [chr(c) for c in range(ord("A"), ord("Z") + 1)]
+           + [str(d) for d in range(1, 10)] + ["0"])
+
 
 def parse_suggestions(data):
     """解析联想结果：data.search_data.vecGroupData[].group_data[].keyword_txt"""
@@ -159,6 +163,11 @@ class Page(tk.Frame):
                 pass
         canvas.bind_all("<MouseWheel>", _wheel)
         self._canvas = canvas
+
+        # 虚拟键盘（对应原版 SearchKeyboard：首字母输入，遥控/鼠标都能用）
+        self.kb_frame = tk.Frame(self, bg=BG)
+        self.kb_frame.pack(side="bottom", fill="x", padx=60, pady=(0, 8))
+        self._render_keyboard()
 
         # 运行期状态（对应原版字段）
         self._result_vods = {}     # source_key -> [(bean, vid, name, pic, remark)]
@@ -298,6 +307,68 @@ class Page(tk.Frame):
                        font=tv_font(10), pady=2,
                        on_select=lambda w0=word: self._search_word(w0)
                        ).pack(side="left", padx=3, pady=2)
+
+    # ── 虚拟键盘（对应 SearchKeyboard.java）──
+    def _render_keyboard(self):
+        for c in range(6):
+            self.kb_frame.columnconfigure(c, weight=1, uniform="kb")
+        for i, key in enumerate(KB_KEYS):
+            if i < 2:  # 首行：远程搜索 / 删除 各占三格
+                row, col, span = 0, i * 3, 3
+            else:
+                n = i - 2
+                row, col, span = 1 + n // 6, n % 6, 1
+            FocusLabel(self.kb_frame, text=key, bg=PANEL, fg=FG,
+                       font=tv_font(11), padx=4, pady=3,
+                       on_select=lambda k=key: self._kb_press(k)
+                       ).grid(row=row, column=col, columnspan=span,
+                              sticky="nsew", padx=2, pady=2)
+
+    def _kb_press(self, key):
+        if key == "远程搜索":
+            self._remote_input()
+            return
+        if key == "删除":
+            text = self.kw.get()
+            if text:
+                self.kw.delete(len(text) - 1, "end")
+        else:
+            self.kw.insert("end", key)
+        self.kw.focus_set()   # 点完键盘继续用物理键盘输入
+        self._on_kw_key()     # 触发首字母联想
+
+    def _remote_input(self):
+        """远程搜索（桌面端退化为粘贴/输入框，对应原版 RemoteDialog）"""
+        win = tk.Toplevel(self)
+        win.title("远程搜索")
+        win.configure(bg=BG)
+        win.transient(self.winfo_toplevel())
+        tk.Label(win, text="输入或粘贴关键词后回车搜索", bg=BG, fg=FG_DIM,
+                 font=tv_font(12)).pack(pady=(18, 8))
+        entry = tk.Entry(win, font=tv_font(14), bg=PANEL, fg=FG,
+                         insertbackground=FG, relief="flat", width=28)
+        entry.pack(padx=24, ipady=5)
+        entry.focus_set()
+
+        def go(_e=None):
+            word = entry.get().strip()
+            win.destroy()
+            if word:
+                self._search_word(word)
+
+        entry.bind("<Return>", go)
+        win.bind("<Escape>", lambda e: win.destroy())
+        row = tk.Frame(win, bg=BG)
+        row.pack(pady=14)
+        FocusLabel(row, text="取消", bg=PANEL, fg=FG, font=tv_font(12),
+                   on_select=win.destroy).pack(side="left", padx=8)
+        FocusLabel(row, text="搜索", bg=BLUE, fg="#FFFFFF",
+                   font=tv_font(12, True),
+                   on_select=go).pack(side="left", padx=8)
+        try:
+            win.grab_set()
+        except tk.TclError:
+            pass
 
     # ── 状态栏（对应 updateSearchStatus 两行文案）──
     def _set_status(self, line1, line2):

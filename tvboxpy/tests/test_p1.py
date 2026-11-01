@@ -205,6 +205,12 @@ _sug = {"data": {"search_data": {"vecGroupData": [{"group_data": [
 eq("search: 拼音联想解析", ui_search.parse_suggestions(_sug), ["流浪地球", "流浪地球2"])
 check("search: 联想接口", "get_search_smart_box" in ui_search.SUGGEST_URL)
 check("search: 输入联想接入", "_on_kw_key" in inspect.getsource(ui_search.Page.__init__))
+eq("search: 虚拟键盘按键数", len(ui_search.KB_KEYS), 38)
+check("search: 键盘 A-Z", all(chr(c) in ui_search.KB_KEYS
+                              for c in range(ord("A"), ord("Z") + 1)))
+check("search: 键盘动作", "_kb_press" in inspect.getsource(ui_search.Page))
+check("search: 键盘接入页面", "_render_keyboard" in
+      inspect.getsource(ui_search.Page.__init__))
 hawk._load()
 _old_fast = hawk._data.get(hawk.FAST_SEARCH, None)
 hawk._data[hawk.FAST_SEARCH] = 0
