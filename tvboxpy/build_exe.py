@@ -26,10 +26,30 @@ ASSETS = [
 ]
 
 
+def _pyinstaller_env():
+    """给 PyInstaller 的 Tcl/Tk 探测提供 Windows Python 自带库路径。
+
+    这套 Python 运行时能找到 tcl86t.dll，但 PyInstaller 的 hook 在未显式
+    设置 TCL_LIBRARY/TK_LIBRARY 时会误判 tkinter 不可用并直接排除。
+    """
+    env = os.environ.copy()
+    python_root = os.path.dirname(PY)
+    candidates = (
+        ("TCL_LIBRARY", os.path.join(python_root, "tcl", "tcl8.6")),
+        ("TK_LIBRARY", os.path.join(python_root, "tcl", "tk8.6")),
+    )
+    for name, path in candidates:
+        if os.path.isfile(os.path.join(path, "init.tcl" if name == "TCL_LIBRARY"
+                                       else "tk.tcl")):
+            env.setdefault(name, path)
+    return env
+
+
 def main():
     print("== PyInstaller ==")
     subprocess.check_call([PY, "-m", "PyInstaller", "tvboxpy.spec",
-                           "--noconfirm"], cwd=HERE)
+                           "--noconfirm", "--clean"],
+                          cwd=HERE, env=_pyinstaller_env())
     print("== 复制 JVM 资产 ==")
     for src, rel in ASSETS:
         dst = os.path.join(DIST, rel)
