@@ -2,7 +2,7 @@
 
 **TVBox4Win**：把安卓 TV 上流行的影视聚合播放器 TVBox 完整搬到桌面。
 
-当前版本：**v0.9.5**（版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
+当前版本：**v0.9.6**（macOS 首发版；版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
 
 把安卓 TV 上流行的影视聚合播放器 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 复刻到桌面：
 **Python 3 + tkinter** 实现，UI 与交互按原版逐页对齐。同一份代码支持两个平台：
@@ -16,7 +16,7 @@
 
 ## 📥 免安装下载（推荐）
 
-不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases/latest) 下载 `TVBox4Win-v0.9.5-win64.zip`：
+不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases) 下载 Windows 安装包（当前最新为 `TVBox4Win-v0.9.5-win64.zip`；v0.9.6 只发布了 macOS 构建，Windows 二进制随后续版本更新）：
 
 1. 解压到任意可写目录
 2. 双击 `TVBox4Win.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
@@ -38,7 +38,7 @@
 
 同一份代码原生跑在 Apple Silicon / Intel Mac 上，产物是 `TVBox4Win.app`——**双击即用，无需安装 Python，也无需 libmpv**。
 
-1. 从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载 `TVBox4Win-macos-arm64.zip`
+1. 从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载 `TVBox4Win-v0.9.6-macos-arm64.zip`
 2. 解压得到 `TVBox4Win.app`，拖进「应用程序」
 3. 首次打开若被 Gatekeeper 拦截：**右键 → 打开**；或执行
    `xattr -dr com.apple.quarantine /Applications/TVBox4Win.app`
@@ -65,7 +65,8 @@
 
 | 版本 | 主要变化 | 下载 |
 |---|---|---|
-| **v0.9.5**（最新） | 点播/搜索页海报网格自适应窗口宽度（右侧留白消除）、海报放大到原版 244:320 比例、片名叠加海报底部、菜单按钮均分整行 | [v0.9.5](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.5) |
+| **v0.9.6**（最新） | **新增 macOS 原生支持**：AVFoundation 播放后端、`.app` 打包、苹方字体、无 JDK 时自动跳过 jar 源；Windows 部分与 v0.9.5 一致 | [v0.9.6](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6)（仅 macOS 构建） |
+| v0.9.5 | 点播/搜索页海报网格自适应窗口宽度（右侧留白消除）、海报放大到原版 244:320 比例、片名叠加海报底部、菜单按钮均分整行 | [v0.9.5](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.5) |
 | v0.9.4 | 直播页整页重构（两层列表 + 进入即播）、修 Esc 退不出的卡死、全局频道编号 + EPG 节目单 | [v0.9.4](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.4) |
 | v0.9.3 | 自定义直播源（点播/直播双输入、直播历史、txt/m3u/JSON 解析） | [v0.9.3](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.3) |
 | v0.9.2 | 全新自绘应用图标、开始版本号体系 | [v0.9.2](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.2) |
