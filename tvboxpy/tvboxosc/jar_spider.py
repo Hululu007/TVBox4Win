@@ -59,6 +59,13 @@ _WORK_DIR = os.path.join(_CACHE_DIR, "work")
 _lock = threading.Lock()
 _jvms = {}   # jar md5 -> JarSpider（同一转换产物共用一个常驻 JVM）
 
+# 准备阶段（下载 + dex2jar 转换）按 jar 地址单独加锁，不占全局 _lock：
+# 一个下载超时的源不能把其它源一起堵住。失败结果短时间内记忆，避免反复等超时。
+_prep_locks = {}
+_fail_until = {}
+_DL_TIMEOUT = 15        # 秒：jar 下载超时（原 60s 会让切源看起来像卡死）
+_FAIL_TTL = 60          # 秒：失败记忆时长
+
 
 def _find_java():
     import shutil
@@ -99,7 +106,7 @@ def _download_jar(url):
             shutil.copyfile(url, path)
             return path
         raise RuntimeError(f"spider jar 不存在: {url}")
-    r = SESSION.get(url, timeout=60, verify=False, stream=True)
+    r = SESSION.get(url, timeout=_DL_TIMEOUT, verify=False, stream=True)
     if r.status_code != 200:
         raise RuntimeError(f"spider jar 下载失败 http {r.status_code}: {url}")
     tmp = path + ".part"
@@ -321,20 +328,60 @@ def _class_name(api):
 
 
 def get_jar_spider(bean):
-    """按 SourceBean 取（并缓存）jar 类爬虫站点代理"""
+    """按 SourceBean 取（并缓存）jar 类爬虫站点代理
+
+    下载 / dex2jar 转换都很慢（且网络可能超时），只在「同 jar」锁里串行，
+    不持有全局 _lock —— 否则切到这种源时任何其它爬虫调用（含 UI 线程里的）
+    都会被阻塞到超时，表现就是整窗卡死。
+    """
     from .apiconfig import api_config
     jar_url = getattr(bean, "jar", None) or api_config.spider
     if not jar_url:
         raise RuntimeError(f"站点 {bean.key} 未配置 spider jar")
     jar_url = _strip_md5(jar_url)
+    conv = _prepare(jar_url)
+    js = _get_jvm(conv)
+    return _SiteProxy(js, _class_name(bean.api), _ext_str(bean.ext))
+
+
+def _get_jvm(conv):
+    """取（或启动）常驻 JVM：启动要几秒，同样不能占全局锁"""
     with _lock:
-        jar_path = _download_jar(jar_url)
-        conv = _convert(jar_path)
         js = _jvms.get(conv)
-        if js is None:
-            js = JarSpider(conv)
+    if js is not None:
+        return js
+    with _prepare_lock("jvm:" + conv):
+        with _lock:
+            js = _jvms.get(conv)
+            if js is not None:
+                return js
+        js = JarSpider(conv)
+        with _lock:
             _jvms[conv] = js
-        return _SiteProxy(js, _class_name(bean.api), _ext_str(bean.ext))
+        return js
+
+
+def _prepare_lock(jar_url):
+    with _lock:
+        lk = _prep_locks.get(jar_url)
+        if lk is None:
+            lk = _prep_locks[jar_url] = threading.Lock()
+        return lk
+
+
+def _prepare(jar_url):
+    """下载 + 转换，返回转换产物路径（同 jar 串行；失败短时记忆）"""
+    import time
+    until = _fail_until.get(jar_url, 0)
+    if until > time.time():
+        raise RuntimeError("spider jar 之前下载失败（网络不可达），请稍后重试")
+    with _prepare_lock(jar_url):
+        try:
+            jar_path = _download_jar(jar_url)
+            return _convert(jar_path)
+        except Exception as e:
+            _fail_until[jar_url] = time.time() + _FAIL_TTL
+            raise RuntimeError(f"spider jar 准备失败：{e}") from e
 
 
 class _SiteProxy:

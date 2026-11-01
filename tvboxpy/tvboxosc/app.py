@@ -41,6 +41,19 @@ class App(tk.Tk):
             start_global_server()
         except Exception:
             pass
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        """退出清理：回收 node/java 爬虫子进程（否则越积越多，越用越卡）"""
+        try:
+            from .spider import shutdown as _spider_shutdown
+            _spider_shutdown()
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def switch(self, frame_cls, *args, **kw):
         """切换页面（对应 startActivity）"""

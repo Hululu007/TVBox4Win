@@ -27,6 +27,7 @@ _CACHE_DIR = data_path(".spider_cache")
 
 _proc_lock = threading.Lock()
 _procs = {}  # key -> Spider
+_spawn_locks = {}  # key -> Lock：只让同一站点的启动串行
 
 
 class SpiderError(Exception):
@@ -174,6 +175,14 @@ def _find_node():
     raise SpiderError("未找到 node 运行时")
 
 
+def _spawn_lock(key):
+    with _proc_lock:
+        lk = _spawn_locks.get(key)
+        if lk is None:
+            lk = _spawn_locks[key] = threading.Lock()
+        return lk
+
+
 def get_spider(bean):
     """按 SourceBean 拿（并缓存）一个 Spider 实例
     api 以 .py 结尾 → py 类爬虫（tvboxosc-python pyramid 运行时同款）
@@ -186,8 +195,17 @@ def get_spider(bean):
         return get_jar_spider(bean)
     with _proc_lock:
         sp = _procs.get(bean.key)
-        if sp is None:
-            sp = Spider(bean.key, bean.api, bean.ext)
+    if sp is not None:
+        return sp
+    # 构造 Spider 会下载站点 js、拉起 node 子进程并 init（可能耗时数秒乃至超时）。
+    # 这段绝不能放在全局锁里：否则切到一个慢站点，会把其它站点的请求全部堵死。
+    with _spawn_lock(bean.key):
+        with _proc_lock:
+            sp = _procs.get(bean.key)
+            if sp is not None:
+                return sp
+        sp = Spider(bean.key, bean.api, bean.ext)
+        with _proc_lock:
             _procs[bean.key] = sp
         return sp
 

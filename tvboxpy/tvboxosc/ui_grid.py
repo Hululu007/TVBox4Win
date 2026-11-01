@@ -106,12 +106,36 @@ class Page(tk.Frame):
         self._prio = 0  # 海报下载优先级：当前内容区=0，推荐位=2
         self._load_classes()
         self._reload_grid()  # 默认「主页」tab：加载豆瓣热播
+        self.after(8000, self._slow_hint)   # 爬虫运行时启动慢时给出可见反馈
+
+    def _slow_hint(self):
+        """分类迟迟未回来时提示，避免「整页像卡死」"""
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self.classes or getattr(self, "load_err", None):
+            return    # 已有结果或已报错，不再反复提示
+        self.status_filter.configure(
+            text="站点响应较慢，正在等待爬虫运行时…（可点「▾ 切换源」换一个）")
+        self.after(8000, self._slow_hint)
 
     # ---------- 数据 ----------
     def _show_sources(self):
         """弹出源选择面板：列出当前配置里所有可用站点，点选即切换"""
         from .apiconfig import api_config
+        # 防重入：面板已开着就把它提到前面，避免叠加多个面板
+        old = getattr(self, "_src_panel", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift()
+                old.focus_force()
+                return
+        except tk.TclError:
+            pass
         panel = tk.Toplevel(self)
+        self._src_panel = panel
         panel.title("切换源")
         panel.configure(bg=BG)
         panel.transient(self.winfo_toplevel())
@@ -135,9 +159,9 @@ class Page(tk.Frame):
                 canvas.yview_scroll(-e.delta // 120, "units")
             except tk.TclError:
                 pass
-        canvas.bind_all("<MouseWheel>", _wheel)
-        panel.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>")
-                   if e.widget is panel else None)
+        # 绑在面板上（子控件事件会冒泡到 toplevel），不要用 bind_all：
+        # 否则面板关闭时 unbind_all 会把主页的滚轮一起解绑
+        panel.bind("<MouseWheel>", _wheel)
 
         beans = [b for b in api_config.source_bean_list if b.name and b.api]
         cols = 4
@@ -157,12 +181,21 @@ class Page(tk.Frame):
             first.focus_set()
 
     def _switch_source(self, bean, panel):
-        if bean.key == self.source_key:
-            panel.destroy()
+        if getattr(self, "_switching", False):   # 防重入：连点不会切两次
             return
+        try:
+            panel.destroy()
+        except tk.TclError:
+            pass
+        self._src_panel = None
+        if bean.key == self.source_key:
+            return
+        self._switching = True
         hawk.put(hawk.HOME_SOURCE, bean.key)
-        panel.destroy()
-        self.app.switch(Page, source_key=bean.key)
+        try:
+            self.app.switch(Page, source_key=bean.key)
+        finally:
+            self._switching = False
 
     def _load_classes(self):
         def run():
@@ -180,36 +213,54 @@ class Page(tk.Frame):
                 from .paths import log_error
                 log_error("get_classes 失败 bean=%s api=%s" %
                           (self.bean.name, self.bean.api), ex)
-            # 后台预取筛选器（避免 UI 线程网络请求）
+            # 先渲染 tab，别让筛选器预取拖住分类显示
+            ui_thread.run(self._render_tabs)
+            # 后台预取筛选器（避免 UI 线程网络请求）；取回来后再决定是否显示筛选按钮
             try:
                 data_api.get_filters(self.bean)
             except Exception:
                 pass
-            ui_thread.run(self._render_tabs)
+            ui_thread.run(self._refresh_filter_btn)
         import threading
         threading.Thread(target=run, daemon=True).start()
+
+    def _clear_tabs(self):
+        """只清 tab 按钮区，保留「⚙ 筛选」按钮与右侧状态标签
+
+        原来这里 `for w in self.tabs_bar.winfo_children(): w.destroy()` 会把
+        status_filter / filter_btn 一并销毁 —— 首屏渲染后筛选入口就消失了，
+        之后任何 configure 都会抛 TclError: invalid command name。
+        """
+        holder = getattr(self, "_tabs_holder", None)
+        if holder is not None:
+            try:
+                holder.destroy()
+            except tk.TclError:
+                pass
+        self._tabs_holder = None
 
     def _render_tabs(self):
         if not self.winfo_exists():
             return
+        self._clear_tabs()
         if not self.classes:
             # 分类加载失败：显示重试
-            for w in self.tabs_bar.winfo_children():
-                w.destroy()
-            FocusLabel(self.tabs_bar, text="⚠ 分类加载失败，点击重试" +
+            holder = tk.Frame(self.tabs_bar, bg=BG)
+            holder.pack(side="left")
+            self._tabs_holder = holder
+            FocusLabel(holder, text="⚠ 分类加载失败，点击重试" +
                        ("：" + self.load_err[:60] if getattr(self, "load_err", None) else ""),
                        bg="#3a1010", fg=FG, font=tv_font(12),
                        on_select=self._retry).pack(side="left", padx=10, pady=2)
             self._show_grid_error()
             return
-        for w in self.tabs_bar.winfo_children():
-            w.destroy()
         items = [("主页", None)]
         items += [(name, cid) for cid, name in self.classes]
         tab_btns = []
         self._tab_map = []  # [(cid, FocusLabel)]
         holder = tk.Frame(self.tabs_bar, bg=BG)
         holder.pack(side="left")
+        self._tabs_holder = holder
         for name, cid in items:
             b = FocusLabel(holder, text=name, bg=PANEL, fg=FG, font=tv_font(12),
                            on_select=lambda c=cid: self.select_class(c))
@@ -257,8 +308,31 @@ class Page(tk.Frame):
                         fg=FOCUS_FG if cur else FG)
 
     def _show_filter(self):
-        """筛选面板（对应 GridFragment.showFilter）"""
-        filters = data_api.get_filters(self.bean).get(str(self.cur_class)) or []
+        """筛选面板（对应 GridFragment.showFilter）
+
+        注意：filters 对 spider 站点要跑一次 home_content（网络 + 爬虫运行时），
+        绝不能放在 UI 线程里取——切源后点一下就会整窗卡死。改为后台取 + 回调开面板。
+        """
+        bean, cls = self.bean, self.cur_class
+        self.status_filter.configure(text="获取筛选中…")
+
+        def run():
+            try:
+                data = data_api.get_filters(bean)
+            except Exception:
+                data = {}
+            ui_thread.run(lambda: self._open_filter_panel(data, cls))
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def _open_filter_panel(self, all_filters, cls):
+        """筛选面板渲染（UI 线程；数据已在后台取好）"""
+        try:
+            if not self.winfo_exists() or cls != self.cur_class:
+                return
+        except tk.TclError:
+            return
+        filters = (all_filters or {}).get(str(cls)) or []
         if not filters:
             self.status_filter.configure(text="该分类无筛选")
             return
@@ -300,7 +374,8 @@ class Page(tk.Frame):
                 return toggle
             toggle = make_toggle()
             for c, v in chips:
-                c.configure(on_select=lambda c=c, v=v, t=toggle: t(c, v))
+                # on_select 是 FocusLabel 的 Python 属性，不能用 configure() 设置
+                c.on_select = (lambda c=c, v=v, t=toggle: t(c, v))
             rows[f["key"]] = chips
 
         def apply():
@@ -311,6 +386,27 @@ class Page(tk.Frame):
 
         FocusLabel(panel, text="应用筛选", bg=ACCENT, fg="#FFFFFF",
                    font=tv_font(12, True), on_select=apply).pack(pady=8)
+
+    def _refresh_filter_btn(self):
+        """筛选器预取完成后刷新「⚙ 筛选」按钮显隐（只读缓存，不联网）"""
+        try:
+            if not self.winfo_exists() or self.bean is None:
+                return
+        except tk.TclError:
+            return
+        btn = getattr(self, "filter_btn", None)
+        if btn is None:
+            return
+        key = f"{self.bean.key}:{self.bean.api}"
+        cached = data_api._filters_cache.get(key, {})
+        has = bool(cached.get(str(self.cur_class))) if self.cur_class else False
+        try:
+            if has and btn.winfo_exists():
+                btn.pack(side="right", padx=4)
+            elif btn.winfo_exists():
+                btn.pack_forget()
+        except tk.TclError:
+            pass
 
     def _retry(self):
         self._load_classes()
