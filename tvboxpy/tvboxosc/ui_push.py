@@ -21,7 +21,18 @@ PORT = 9978
 # 全局常驻推送服务状态（对应 Java ControlManager.startServer 主页即启动）
 PUSHED = []            # [(title, url)]
 _SERVER = [None]
+_PORT = [PORT]         # 实际监听端口（9978 被占用时向后顺延，对应原版 9978-9999）
 _UI_CB = [None]        # 推送页注册的刷新回调
+
+
+def server_port():
+    """本地服务实际端口；未启动时返回默认端口"""
+    return _PORT[0]
+
+
+def proxy_base():
+    """本地代理根地址，带结尾 /（对应 ControlManager.getAddress(true)）"""
+    return "http://127.0.0.1:%d/" % server_port()
 
 
 def _notify_ui(msg):
@@ -42,6 +53,26 @@ def start_global_server():
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _send(self, code, ctype, body, headers=None):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype or "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            for key, val in (headers or {}).items():
+                self.send_header(key, val)
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+
+        def _handle_proxy(self, params):
+            """播放代理（对应 util/Proxy.java 的 /proxy 路由）"""
+            from . import local_proxy
+            try:
+                code, ctype, body, headers = local_proxy.handle(params, proxy_base())
+            except Exception as exc:
+                code, ctype, body, headers = 500, "text/plain; charset=utf-8", \
+                    ("proxy error: %s" % exc).encode("utf-8"), {}
+            self._send(code, ctype, body, headers)
 
         def _handle_push(self, url, title):
             if not url.startswith(("http", "rtmp", "rtp", "udp")):
@@ -79,8 +110,11 @@ def start_global_server():
                 self._handle_push(url, title)
 
         def do_GET(self):
-            if self.path.startswith(("/push", "/api")):
-                self._dispatch(parse_qs(urlparse(self.path).query))
+            parsed = urlparse(self.path)
+            if parsed.path == "/proxy":
+                self._handle_proxy(parse_qs(parsed.query))
+            elif self.path.startswith(("/push", "/api")):
+                self._dispatch(parse_qs(parsed.query))
             else:
                 self._reply(_FORM)
 
@@ -106,11 +140,16 @@ def start_global_server():
             pass
 
     def run():
-        try:
-            _SERVER[0] = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-            _SERVER[0].serve_forever()
-        except OSError:
-            pass
+        # 端口被占用时向后顺延（对应原版 RemoteServer 9978→9999 的自增重试）
+        for port in range(PORT, PORT + 22):
+            try:
+                server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+            except OSError:
+                continue
+            _PORT[0] = port
+            _SERVER[0] = server
+            server.serve_forever()
+            return
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -168,7 +207,8 @@ class Page(tk.Frame):
                  ).pack(side="left", padx=10)
 
         ips = _local_ips()
-        tip = "\n".join(f"http://{ip}:{PORT}" for ip in ips) or "未获取到局域网 IP"
+        tip = "\n".join(f"http://{ip}:{server_port()}" for ip in ips) \
+            or "未获取到局域网 IP"
         tk.Label(self, text=f"手机浏览器打开：\n{tip}\n提交视频链接后，在下方列表选中播放",
                  bg=BG, fg=FG_DIM, font=tv_font(12), justify="center").pack(pady=8)
 

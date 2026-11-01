@@ -27,6 +27,7 @@ a = Analysis(
         'tvboxosc.spider', 'tvboxosc.player', 'tvboxosc.imgcache', 'tvboxosc.store',
         'tvboxosc.theme', 'tvboxosc.data_api', 'tvboxosc.hawk',
         'tvboxosc.apiconfig', 'tvboxosc.ui_thread', 'tvboxosc.app',
+        'tvboxosc.local_proxy',
         'mpv', 'requests', 'tkinter', '_tkinter',
     ],
     hookspath=['hooks'],

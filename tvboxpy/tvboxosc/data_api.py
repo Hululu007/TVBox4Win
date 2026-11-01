@@ -299,77 +299,253 @@ def get_detail(bean, vod_id):
     return info
 
 
+# 原版 DefaultConfig.snifferMatch 的 Python 版（扩展名 + 厂商特殊直链）
+_SNIFFER_RE = re.compile(
+    r"http((?!http).){12,}?\.(m3u8|mp4|flv|avi|mkv|rm|wmv|mpg|m4a|mp3|aac|mpd)\?.*|"
+    r"http((?!http).){12,}\.(m3u8|mp4|flv|avi|mkv|rm|wmv|mpg|m4a|mp3|aac|mpd)|"
+    r"http((?!http).)*?video/tos*|"
+    r"http((?!http).){20,}?/m3u8\?pt=m3u8.*|"
+    r"http((?!http).)*?default\.ixigua\.com/.*|"
+    r"http((?!http).)*?dycdn-tos\.pstatp[^?]*|"
+    r"http.*?/player/m3u8play\.php\?url=.*|"
+    r"http.*?/player/.*?[pP]lay\.php\?url=.*|"
+    r"http.*?/playlist/m3u8/\?vid=.*|"
+    r"http.*?\.php\?type=m3u8&.*|"
+    r"http.*?/download\.aspx\?.*|"
+    r"http.*?/api/up_api\.php\?.*|"
+    r"https.*?\.66yk\.cn.*|"
+    r"http((?!http).)*?netease\.com/file/.*",
+    re.I,
+)
+
 _MEDIA_RE = re.compile(
     r"\.(m3u8|mp4|flv|mkv|ts|avi|mov|mp3|aac|m4a|mpd)([?#]|$)", re.I)
 
+_QUOTED_MEDIA_RE = re.compile(
+    r'''["']([^"'\s<>]*?\.(?:m3u8|mp4|flv|mkv|ts|avi|mov|mpd|mp3|m4a|aac)'''
+    r'''(?:\?[^"'\s<>]*)?)["']''', re.I)
+_ABS_URL_RE = re.compile(r'''https?://[^\s"'<>\\]+''', re.I)
+_QUOTED_ANY_RE = re.compile(r'''["']([^"'\s<>]{3,1000})["']''')
 
-def _looks_media(url):
+
+def is_video_format(url):
+    """对应原版 DefaultConfig.isVideoFormat：判断链接是否可以直接播放"""
     if not url:
         return False
-    return bool(_MEDIA_RE.search(url)) or url[:7] in ("rtmp://", "rtp://", "udp://") \
-        or url[:6] == "rtsp://"
+    if url.startswith(("rtsp://", "rtmp://", "rtp://", "udp://")):
+        return True
+    # 比原版宽松一点：短路径直链（如 http://a.cn/1.mp4）也认
+    return bool(_SNIFFER_RE.search(url)) or bool(_MEDIA_RE.search(url))
 
 
-def _parse_json_api(api, page_url):
-    """JSON 解析接口：api + urlencode(网页链接) → {"url": 真实地址, "header": ...}"""
-    if not api or not api.startswith(("http://", "https://")):
+_looks_media = is_video_format  # 兼容旧内部调用
+
+
+def _clean_candidate(url):
+    if not url:
+        return ""
+    return url.strip().strip("\"'").rstrip(",;:)]}").strip()
+
+
+def _sniff_text(text, base_url):
+    """在 HTML/JSON 文本里找可播地址（对应 WebView 嗅探 + VideoParseRuler）"""
+    if not text:
         return None
-    sep = "&" if "?" in api else "?"
-    text = fetch_text(api + sep + urllib.parse.quote(page_url, safe=""))
-    cfg = extract_json(text) if text else None
-    if cfg:
-        u = cfg.get("url")
-        if isinstance(u, str) and u:
-            hdr = cfg.get("header")
-            return u, hdr if isinstance(hdr, dict) else None
+    from .apiconfig import host_filters, host_of, host_rules, filters_match, rules_match
+    text = text.replace("\\/", "/").replace("&amp;", "&")
+    host = host_of(base_url)
+    rules = host_rules(host)
+    filters = host_filters(host)
+    seen = set()
+
+    def keep(cand):
+        if not cand:
+            return None
+        if cand.startswith(("data:", "blob:", "javascript:", "about:")):
+            return None
+        url = urllib.parse.urljoin(base_url, cand)
+        if not url.startswith(("http://", "https://")):
+            return None
+        if url in seen:
+            return None
+        seen.add(url)
+        if filters and filters_match(url, filters):
+            return None
+        if is_video_format(url) or (rules and rules_match(url, rules)):
+            return url
+        return None
+
+    # 1. 带引号的媒体串（含相对路径）
+    for m in _QUOTED_MEDIA_RE.finditer(text):
+        url = keep(_clean_candidate(m.group(1)))
+        if url:
+            return url
+    # 2. 绝对地址
+    for m in _ABS_URL_RE.finditer(text):
+        url = keep(_clean_candidate(m.group(0)))
+        if url:
+            return url
+    # 3. 配置里给该 host 写了自定义规则：再扫一遍引号内容
+    if rules:
+        for m in _QUOTED_ANY_RE.finditer(text):
+            url = keep(_clean_candidate(m.group(1)))
+            if url:
+                return url
     return None
 
 
-def _sniff_page(page_url):
-    """页面嗅探兜底：在 HTML 里找直链媒体地址。
-    兼容 lz 等分享页的相对地址（var main = "/xxx/index.m3u8?sign=..."）"""
-    text = fetch_text(page_url)
+def _sniff_page(page_url, headers=None):
+    """页面嗅探兜底：拉取网页后在文本里找直链"""
+    text = fetch_text(page_url, headers=headers, timeout=10, retries=1)
+    return _sniff_text(text, page_url) if text else None
+
+
+def _join_parse_url(api, page_url, encoded=True):
+    """解析接口拼接：原版 type1 用 encodeUrl，type0 直接拼页面地址"""
+    tail = urllib.parse.quote(page_url, safe="") if encoded else page_url
+    if api.endswith(("=", "?", "&")):
+        return api + tail
+    if "?" not in api:
+        return api + "?" + tail
+    return api + tail
+
+
+def _parse_json_api(bean, page_url):
+    """JSON 解析接口：api + 网页链接 → {"url","header","parse"}
+    兼容纯文本直链返回；解析失败返回 None 交给调用方嗅探。"""
+    from .apiconfig import headers_from
+    api = getattr(bean, "url", None) or str(bean)
+    if not api or not api.startswith(("http://", "https://")):
+        return None
+    headers = getattr(bean, "headers", None) or None
+    text = fetch_text(_join_parse_url(api, page_url),
+                      headers=headers, timeout=10, retries=1)
     if not text:
         return None
-    # 带引号的媒体串（含相对路径），urljoin 补全为绝对地址
-    m = re.search(r'''["']([^"']+?\.(?:m3u8|mp4|flv|mkv|avi)(?:\?[^"']*)?)["']''',
-                  text, re.I)
-    if m:
-        return urllib.parse.urljoin(page_url, m.group(1))
-    m = re.search(r'https?://[^\s"\'<>\\]+?\.(?:m3u8|mp4|flv|mkv)[^\s"\'<>\\]*',
-                  text, re.I)
-    return m.group(0) if m else None
+    cfg = extract_json(text)
+    if isinstance(cfg, dict):
+        u = cfg.get("url") or cfg.get("playUrl")
+        if isinstance(u, str) and u.strip():
+            try:
+                parse_flag = int(cfg.get("parse", 0) or 0)
+            except (TypeError, ValueError):
+                parse_flag = 0
+            return {"url": u.strip(), "header": headers_from(cfg) or None,
+                    "parse": parse_flag}
+    plain = text.strip()
+    if plain.startswith(("http://", "https://")) and len(plain) < 2048 \
+            and "<" not in plain:
+        return {"url": plain, "header": None, "parse": 0}
+    return None
+
+
+def _resolve_parsed(result, page_url):
+    """解析结果 → 可播地址；parse==1 表示仍是网页，需再嗅探一次"""
+    from .apiconfig import check_replace_proxy
+    if not result:
+        return None
+    url = check_replace_proxy(result.get("url") or "")
+    if not url:
+        return None
+    header = result.get("header") or None
+    if result.get("parse") == 1 or not is_video_format(url):
+        sniffed = _sniff_page(url, header)
+        if sniffed:
+            return sniffed, header
+        return None
+    return url, header
+
+
+def _try_parse_bean(bean, page_url):
+    """按原版 parse.type 执行单个解析接口，失败返回 None"""
+    from .apiconfig import check_replace_proxy, headers_from
+    ptype = int(getattr(bean, "type", 0) or 0)
+    api = bean.mix_url() if ptype == 2 else bean.url
+    if not api.startswith(("http://", "https://")):
+        return None
+    # type0 = WebView 直开播放页；type4 = SuperParse（嗅探 + JSON 并发）
+    targets = []
+    if ptype == 0:
+        targets.append(_join_parse_url(api, page_url, encoded=False))
+    else:
+        targets.append(_join_parse_url(api, page_url))
+        if ptype == 4:
+            targets.append(_join_parse_url(api, page_url, encoded=False))
+    headers = getattr(bean, "headers", None) or None
+    for target in targets:
+        text = fetch_text(target, headers=headers, timeout=10, retries=1)
+        if not text:
+            continue
+        cfg = extract_json(text)
+        if isinstance(cfg, dict):
+            u = cfg.get("url") or cfg.get("playUrl")
+            if isinstance(u, str) and u.strip():
+                try:
+                    parse_flag = int(cfg.get("parse", 0) or 0)
+                except (TypeError, ValueError):
+                    parse_flag = 0
+                got = _resolve_parsed({
+                    "url": check_replace_proxy(u.strip()),
+                    "header": headers_from(cfg) or None,
+                    "parse": parse_flag,
+                }, page_url)
+                if got:
+                    return got
+        # 解析接口返回的是播放页（或无效果）：静态嗅探代替原版 WebView
+        sniffed = _sniff_text(text, target)
+        if sniffed:
+            return sniffed, headers
+    return None
 
 
 def _second_parse(bean, page_url, play_url):
-    """parse==1 的网页链接 → 真实视频地址（对应原版 parse/嗅探流程）
+    """网页播放地址 → 真实媒体地址（对应原版 parse/嗅探流程）
     返回 (url, header) 或 None"""
-    from .apiconfig import api_config
-    candidates = []
-    # 1. playerContent 自带的 playUrl、站点的 playerUrl
-    for u in (play_url, getattr(bean, "player_url", "")):
-        if u:
-            candidates.append(u)
-    # 2. 配置 parses 里 JSON 解析接口（flag 0=通用, 1=json）
-    for p in api_config.parse_bean_list:
-        if p.flag in (0, 1) and p.url.startswith(("http://", "https://")):
-            candidates.append(p.url)
-    tried = set()
-    for api in candidates:
-        if api in tried:
-            continue
-        tried.add(api)
-        try:
-            r = _parse_json_api(api, page_url)
-        except Exception:
-            r = None
-        if r and _looks_media(r[0]):
-            return r
-    # 3. 页面嗅探
+    from .apiconfig import ParseBean, api_config
+    beans = list(api_config.parse_bean_list)
+    # 站点自带 playUrl 也当解析接口（原版是 playUrl + url 直接拼，见 PlayFragment.java:1263）
+    if play_url and play_url.startswith(("http://", "https://")) \
+            and not is_video_format(play_url):
+        beans.insert(0, ParseBean("playUrl", play_url, None, 4))
+    if not beans:
+        sniffed = _sniff_page(page_url)
+        return (sniffed, None) if sniffed else None
+
+    # 解析接口并发执行，谁先成功用谁（对应 type3/4 的聚合解析）
+    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+    pool = ThreadPoolExecutor(max_workers=min(4, len(beans)))
+    futures = {pool.submit(_try_parse_bean, p, page_url) for p in beans}
+    try:
+        for fut in as_completed(futures, timeout=12):
+            try:
+                got = fut.result()
+            except Exception:
+                got = None
+            if got:
+                for f in futures:
+                    f.cancel()
+                return got
+    except TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    # 最后直接嗅探原网页
     sniffed = _sniff_page(page_url)
     if sniffed:
         return sniffed, None
     return None
+
+
+def _finalize(url, header):
+    """播放地址收口：proxy:// 转换 + 配置 hosts 映射"""
+    from .apiconfig import apply_host_mapping, check_replace_proxy, proxy_base
+    if not isinstance(url, str):
+        return url, header
+    url = check_replace_proxy(url)
+    if "127.0.0.1:UndCover/proxy" in url:
+        url = url.replace("http://127.0.0.1:UndCover/proxy",
+                          proxy_base() + "proxy")
+    return apply_host_mapping(url, header)
 
 
 def get_play_url(bean, flag, ep_url):
@@ -377,42 +553,50 @@ def get_play_url(bean, flag, ep_url):
     - type3 走 playerContent；parse==1 的页面链接自动走 parses/嗅探二次解析
     - type0/1 对应原版 isVideoFormat 判断：非媒体直链（网页/分享页）同样二次解析
     返回 (url, header)；header 为请求头 dict 或 None"""
+    ep_url = str(ep_url or "")
     if not _is_spider(bean):
         # 原版 type0/1：isVideoFormat(requestUrl) ? 直接播 : parse=1 二次解析
-        if _looks_media(ep_url) or not ep_url.startswith(("http://", "https://")):
-            return ep_url, None
+        if is_video_format(ep_url) or not ep_url.startswith(("http://", "https://")):
+            return _finalize(ep_url, None)
         # 分享页/网页直链：先嗅探页面直链（快，~1s），失败再试 parses 接口
         try:
             sniffed = _sniff_page(ep_url)
         except Exception:
             sniffed = None
-        if sniffed and _looks_media(sniffed):
-            return sniffed, None
+        if sniffed:
+            return _finalize(sniffed, None)
         try:
             got = _second_parse(bean, ep_url,
                                 getattr(bean, "player_url", "") or "")
         except Exception:
             got = None
         if got:
-            return got
-        return ep_url, None  # 解析失败原样返回，让播放器报错可见
-    from .apiconfig import api_config
+            return _finalize(got[0], got[1])
+        return _finalize(ep_url, None)  # 解析失败原样返回，让播放器报错可见
+    from .apiconfig import api_config, headers_from
     from .spider import get_spider
     r = get_spider(bean).player_content(flag, ep_url, api_config.flags)
     url = str(r.get("url") or "")
     hdr = r.get("header") if isinstance(r.get("header"), dict) else None
-    if url and not r.get("parse") in (1, "1", True):
+    if hdr is None:
+        hdr = headers_from(r) or None
+    if not url:
         return url, hdr
+    if not r.get("parse") in (1, "1", True):
+        return _finalize(url, hdr)
     # parse==1：网页链接，需要二次解析
-    if _looks_media(url):
-        return url, hdr
+    if is_video_format(url):
+        return _finalize(url, hdr)
+    sniffed = _sniff_page(url, hdr)
+    if sniffed:
+        return _finalize(sniffed, hdr)
     try:
         got = _second_parse(bean, url, str(r.get("playUrl") or ""))
     except Exception:
         got = None
     if got:
-        return got
-    return url, hdr  # 解析失败原样返回，让 mpv 报错可见
+        return _finalize(got[0], got[1])
+    return _finalize(url, hdr)  # 解析失败原样返回，让 mpv 报错可见
 
 
 def _probe_source(b):

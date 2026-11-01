@@ -30,6 +30,7 @@ from .paths import data_path
 _CACHE_DIR = data_path(".spider_cache")
 _lock = threading.Lock()
 _loaded = {}  # key -> Spider 实例
+_CURRENT = [""]  # 最近一次使用的 py 站点 key（localProxy 无 siteKey 时用它）
 
 _FALLBACK_STATUS = (403, 429, 495, 496, 497, 525, 526, 527)
 
@@ -504,8 +505,9 @@ class Spider:
         return json.dumps(content, ensure_ascii=False)
 
     def getProxyUrl(self, local=True):
-        # 本地 9978 推送服务同时充当 localProxy（/proxy?do=py&...）
-        return f"http://127.0.0.1:9978/proxy?do=py"
+        # 本地推送服务同时充当 localProxy（对应原版 Proxy.getUrl(local)）
+        from .ui_push import proxy_base
+        return proxy_base() + "proxy?do=py"
 
     def log(self, msg):
         if isinstance(msg, (dict, list)):
@@ -592,6 +594,7 @@ class PySpider:
                 impl.extend = extend
             getattr(impl, "init", lambda *a: None)(extend)
             self._impl = impl
+            _CURRENT[0] = self.key
 
     # ---- 与 drpy Spider 同构的方法 ----
     def home_content(self, filtr=True):
@@ -634,6 +637,23 @@ class PySpider:
                                      json.dumps(vip_flags or [], ensure_ascii=False))) \
             or {"parse": 1, "url": str(ep_id)}
 
+    def local_proxy(self, param):
+        """调用爬虫的 localProxy（原版通过 /proxy?do=py 回传）"""
+        self._ensure()
+        fn = getattr(self._impl, "localProxy", None)
+        if not callable(fn):
+            return None
+        raw = param if isinstance(param, str) else json.dumps(
+            param, ensure_ascii=False)
+        try:
+            return fn(raw)
+        except TypeError:
+            # 部分实现按 dict 接收参数
+            try:
+                return fn(json.loads(raw))
+            except Exception:
+                return None
+
     @staticmethod
     def _json(result):
         if isinstance(result, str):
@@ -652,6 +672,30 @@ def get_py_spider(key, api, ext=None):
             sp = PySpider(key, api, ext)
             _loaded[k] = sp
         return sp
+
+
+def proxy_spider(params):
+    """按请求参数找 localProxy 所属的 py 爬虫（对应 ApiConfig 的 currentPyKey）"""
+    site = ""
+    for key in ("siteKey", "site_key", "key"):
+        val = params.get(key)
+        if isinstance(val, (list, tuple)):
+            val = val[0] if val else ""
+        if val:
+            site = str(val)
+            break
+    with _lock:
+        if site:
+            sp = _loaded.get("py::" + site)
+            if sp is not None:
+                return sp
+        if _CURRENT[0]:
+            sp = _loaded.get("py::" + _CURRENT[0])
+            if sp is not None:
+                return sp
+        if len(_loaded) == 1:
+            return next(iter(_loaded.values()))
+    return None
 
 
 def shutdown():

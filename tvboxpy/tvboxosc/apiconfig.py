@@ -1,7 +1,10 @@
 """ApiConfig 复刻（对应 api/ApiConfig.java + bean/SourceBean.java + bean/ParseBean.java）"""
 import json
 import os
+import re
+import socket
 import threading
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -15,6 +18,108 @@ SESSION.headers.update({"User-Agent": "okhttp/4.9.3"})
 STORE_PATH = data_path("tvbox.json")
 
 _AD_HOSTS = set()  # ads 域名拦截（对应 Java AdBlocker）
+
+# 配置 hosts：域名 → IP/域名（对应 ApiConfig.myHosts + OkGoHelper.CustomDns）
+_HOSTS = {}
+# 配置 rules：按页面 host 的嗅探规则 / 过滤规则（对应 util/VideoParseRuler）
+_HOST_RULES = {}
+_HOST_FILTERS = {}
+_HOST_AD_REGEX = {}
+_HOST_SCRIPTS = {}
+
+_ORIG_GETADDRINFO = socket.getaddrinfo
+
+
+def _install_hosts_patch():
+    """把配置 hosts 挂到进程 DNS 解析上：保留原 Host/SNI，只换解析结果。"""
+    def _getaddrinfo(host, port, *args, **kwargs):
+        name = host.decode("idna", "ignore") if isinstance(host, bytes) else host
+        mapped = _HOSTS.get((name or "").lower().rstrip("."))
+        if mapped:
+            host = mapped
+        return _ORIG_GETADDRINFO(host, port, *args, **kwargs)
+    socket.getaddrinfo = _getaddrinfo
+
+
+_install_hosts_patch()
+
+
+def host_of(url):
+    """取 URL 的 host（小写，无端口）"""
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def host_rules(host):
+    """页面 host 的嗅探规则；无匹配时回落到 "*"（对应 getHostRules）"""
+    return _HOST_RULES.get(host) or _HOST_RULES.get("*")
+
+
+def host_filters(host):
+    """页面 host 的嗅探过滤规则（对应 getHostFilters，无 "*" 回落）"""
+    return _HOST_FILTERS.get(host)
+
+
+def rules_match(url, groups):
+    """一组规则里任意一条的全部正则都命中即算视频地址（对应 checkVideoForOneHostRules）"""
+    if not url or not groups:
+        return False
+    for group in groups:
+        if group and all(re.search(p, url) for p in group):
+            return True
+    return False
+
+
+def filters_match(url, groups):
+    """过滤规则命中即丢弃（对应 checkIsFilterForOneHostRules）"""
+    if not url or not groups:
+        return False
+    for group in groups:
+        if group and any(re.search(p, url) for p in group):
+            return True
+    return False
+
+
+def proxy_base():
+    """本地代理服务根地址（带结尾 /），对应 ControlManager.getAddress(true)"""
+    from .ui_push import proxy_base as _base
+    return _base()
+
+
+def check_replace_proxy(url):
+    """proxy:// 协议 → 本地 /proxy（对应 DefaultConfig.checkReplaceProxy）"""
+    if isinstance(url, str) and url.startswith("proxy://"):
+        return proxy_base() + "proxy?" + url[len("proxy://"):]
+    return url
+
+
+def apply_host_mapping(url, header=None):
+    """把配置 hosts 映射落到最终播放地址。
+
+    mpv 不经过 Python 的 DNS，所以播放地址要直接换成 IP，并补上原 Host 头。
+    返回 (url, header dict 或 None)。
+    """
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return url, header
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url, header
+    host = (parts.hostname or "").lower()
+    mapped = _HOSTS.get(host)
+    if not mapped or mapped == host:
+        return url, header
+    netloc = mapped
+    if parts.port:
+        netloc = f"{mapped}:{parts.port}"
+    new_url = urlunsplit((parts.scheme, netloc, parts.path, parts.query,
+                          parts.fragment))
+    headers = dict(header or {})
+    headers.setdefault("Host", host)
+    return new_url, headers
+
 
 
 def clan_to_address(url):
@@ -39,10 +144,15 @@ class SourceBean:
         self.api = ""
         self.searchable = 0
         self.quick_search = 0
+        self.changeable = 1
         self.filterable = 0
         self.player_url = ""
         self.ext = None
         self.jar = None
+        self.player_type = -1
+        self.timeout = 0
+        self.click = ""
+        self.style = ""
         self.categories = []
 
     @classmethod
@@ -57,38 +167,102 @@ class SourceBean:
         b.api = str(d.get("api", ""))
         b.searchable = int(d.get("searchable", 1) or 0)
         b.quick_search = int(d.get("quickSearch", 1) or 0)
+        b.changeable = int(d.get("changeable", 1) or 0)
         b.filterable = int(d.get("filterable", 1) or 0)
         b.player_url = str(d.get("playUrl", "") or "")
         b.ext = d.get("ext")
         b.jar = d.get("jar")
+        try:
+            b.player_type = int(d.get("playerType", -1))
+        except (TypeError, ValueError):
+            b.player_type = -1
+        try:
+            b.timeout = int(d.get("timeout", 0) or 0)
+        except (TypeError, ValueError):
+            b.timeout = 0
+        b.click = str(d.get("click", "") or "")
+        b.style = str(d.get("style", "") or "")
         b.categories = d.get("categories") or []
+        if b.key.startswith("py_"):
+            # 原版对 py_ 站点强制开启筛选（ApiConfig.java:766-770）
+            b.filterable = 1
         return b
 
     def is_type012(self):
         return self.type in (0, 1, 2)
 
 
+def headers_from(obj):
+    """从 JSON 对象/字符串里提取 header/headers（对应 PlayFragment.getHeaders）"""
+    if isinstance(obj, str):
+        text = obj.strip()
+        if not text.startswith("{"):
+            return {}
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(obj, dict):
+        return {}
+    out = {}
+    for key in ("header", "headers"):
+        raw = obj.get(key)
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = None
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                out[str(k)] = str(v)
+    return out
+
+
 class ParseBean:
-    def __init__(self, name="", url="", ext=None, flag=0):
-        self.name, self.url, self.ext, self.flag = name, url, ext, flag
+    """解析接口（对应 bean/ParseBean.java）
+
+    type 语义与原版一致：0=WebView 嗅探，1=JSON 接口，2=JSON 扩展，
+    3=JSON 聚合，4=SuperParse（嗅探+JSON 并发）。
+    """
+    def __init__(self, name="", url="", ext=None, type=0):
+        self.name, self.url, self.ext = name, url, ext
+        self.type = type
+        self.headers = headers_from(ext)
+
+    @property
+    def flag(self):
+        """兼容旧代码里的 flag 字段"""
+        return self.type
+
+    def mix_url(self):
+        """ext 编码进 URL（对应 ParseBean.mixUrl）"""
+        if not self.ext or not isinstance(self.ext, str) or "?" not in self.url:
+            return self.url
+        import base64
+        ext = self.ext.encode("utf-8")
+        val = base64.urlsafe_b64encode(ext).decode("ascii")
+        idx = self.url.index("?")
+        return self.url[:idx + 1] + "cat_ext=" + val + "&" + self.url[idx + 1:]
 
 
-def fetch_text(url):
+def fetch_text(url, headers=None, timeout=15, retries=3):
     if is_ad_host(url):
         return None
     _FALLBACK_STATUS = (403, 429, 495, 496, 497, 525, 526, 527)  # TLS 指纹被拒等
-    for attempt in range(3):
+    for attempt in range(max(1, retries)):
         try:
-            r = SESSION.get(url, timeout=15, verify=False)
+            r = SESSION.get(url, timeout=timeout, verify=False,
+                            headers=headers or None)
             if r.status_code == 200 and r.text:
                 r.encoding = "utf-8"
                 return r.text
             if r.status_code in _FALLBACK_STATUS:
                 # 借鉴 tvboxosc-python app.py：换 UA/客户端特征重试
                 try:
-                    r2 = requests.get(
-                        url, timeout=15, verify=False,
-                        headers={"User-Agent": "okhttp/4.12.0"})
+                    fallback = dict(headers or {})
+                    fallback["User-Agent"] = "okhttp/4.12.0"
+                    r2 = requests.get(url, timeout=timeout, verify=False,
+                                      headers=fallback)
                     if r2.status_code == 200 and r2.text:
                         r2.encoding = "utf-8"
                         return r2.text
@@ -235,6 +409,8 @@ class ApiConfig:
         for ad in (cfg.get("ads") or []):
             if ad:
                 _AD_HOSTS.add(str(ad))
+        self._parse_hosts(cfg)
+        self._parse_rules(cfg)
         self.source_bean_list = []
         self.source_key_list = []
         for d in cfg.get("sites", []):
@@ -256,9 +432,69 @@ class ApiConfig:
             self.source_key_list.append(b.key)
         self.parse_bean_list = []
         for d in cfg.get("parses", []):
+            if not isinstance(d, dict):
+                continue
+            try:
+                ptype = int(d.get("type", d.get("flag", 0)) or 0)
+            except (TypeError, ValueError):
+                ptype = 0
             self.parse_bean_list.append(ParseBean(
                 str(d.get("name", "")), str(d.get("url", "")),
-                d.get("ext"), int(d.get("flag", 0) or 0)))
+                d.get("ext"), ptype))
+
+    def _parse_hosts(self, cfg):
+        """配置 hosts：域名=IP（对应 ApiConfig.java:856-866）"""
+        _HOSTS.clear()
+        for entry in (cfg.get("hosts") or []):
+            if not isinstance(entry, str):
+                continue
+            parts = entry.split("=", 1)
+            if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                _HOSTS[parts[0].strip().lower().rstrip(".")] = parts[1].strip()
+
+    def _parse_rules(self, cfg):
+        """嗅探/过滤/广告规则（对应 ApiConfig.java:868-933 + VideoParseRuler）"""
+        _HOST_RULES.clear()
+        _HOST_FILTERS.clear()
+        _HOST_AD_REGEX.clear()
+        _HOST_SCRIPTS.clear()
+
+        def _str_list(raw):
+            return [str(x) for x in raw] if isinstance(raw, list) else []
+
+        for obj in (cfg.get("rules") or []):
+            if not isinstance(obj, dict):
+                continue
+            host = str(obj.get("host", "") or "")
+            if host:
+                rules = _str_list(obj.get("rule"))
+                if rules:
+                    _HOST_RULES.setdefault(host, []).append(rules)
+                filters = _str_list(obj.get("filter"))
+                if filters:
+                    _HOST_FILTERS.setdefault(host, []).append(filters)
+            hosts = _str_list(obj.get("hosts"))
+            regex = _str_list(obj.get("regex"))
+            if hosts and regex:
+                normal = [r for r in regex if not _is_ad_regex(r)]
+                ads = [r for r in regex if _is_ad_regex(r)]
+                for h in hosts:
+                    if normal:
+                        _HOST_RULES.setdefault(h, []).append(normal)
+                    if ads:
+                        _HOST_AD_REGEX.setdefault(h, []).extend(ads)
+            scripts = _str_list(obj.get("script"))
+            if hosts and scripts:
+                for h in hosts:
+                    _HOST_SCRIPTS.setdefault(h, []).extend(scripts)
+
+
+def _is_ad_regex(regex):
+    """对应 M3u8.isAd：播放列表标签/纯数字正则属于广告过滤规则"""
+    return any(tag in regex for tag in (
+        "#EXT-X-DISCONTINUITY", "#EXTINF", "#EXT-X-ENDLIST", "#EXT-X-KEY",
+        "#EXT-X-CUE-OUT", "#EXT-X-CUE-IN", "#EXT-X-DATERANGE")) or \
+        bool(re.fullmatch(r"\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*", regex))
 
 
 
