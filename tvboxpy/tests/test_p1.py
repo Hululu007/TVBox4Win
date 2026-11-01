@@ -196,6 +196,15 @@ check("action: 非爬虫源降级", (ok is False) and msg, (ok, msg))
 # ------------------------------------------------------------ 搜索范围 ----
 _src_search = inspect.getsource(ui_search.Page._search_run)
 check("search: searchable 1/2", "searchable in (1, 2)" in _src_search)
+_sug = {"data": {"search_data": {"vecGroupData": [{"group_data": [
+    {"dtReportInfo": {"reportData": {"keyword_txt": " 流浪地球 "}}},
+    {"dtReportInfo": {"reportData": {"keyword_txt": "流浪地球2"}}},
+    {"dtReportInfo": {"reportData": {"keyword_txt": "流浪地球"}}},
+    {},
+]}]}}}
+eq("search: 拼音联想解析", ui_search.parse_suggestions(_sug), ["流浪地球", "流浪地球2"])
+check("search: 联想接口", "get_search_smart_box" in ui_search.SUGGEST_URL)
+check("search: 输入联想接入", "_on_kw_key" in inspect.getsource(ui_search.Page.__init__))
 hawk._load()
 _old_fast = hawk._data.get(hawk.FAST_SEARCH, None)
 hawk._data[hawk.FAST_SEARCH] = 0

@@ -51,6 +51,38 @@ def match_result(name, kw):
     return all(t in name for t in tokens)
 
 
+# 拼音首字母联想（对应 SearchActivity.loadRec 的腾讯 smart_box 接口）
+SUGGEST_URL = ("https://tv.aiseet.atianqi.com/i-tvbin/qtv_video/"
+               "search/get_search_smart_box")
+
+
+def parse_suggestions(data):
+    """解析联想结果：data.search_data.vecGroupData[].group_data[].keyword_txt"""
+    out = []
+    try:
+        groups = data["data"]["search_data"]["vecGroupData"]
+        items = []
+        for g in groups:
+            items.extend(g.get("group_data") or [])
+    except (KeyError, TypeError, AttributeError):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        word = ""
+        try:
+            word = item["dtReportInfo"]["reportData"]["keyword_txt"]
+        except (KeyError, TypeError):
+            for key in ("keyword", "word", "title"):
+                if isinstance(item.get(key), str):
+                    word = item[key]
+                    break
+        word = str(word or "").strip()
+        if word and word not in out:
+            out.append(word)
+    return out
+
+
 class Page(tk.Frame):
     """对应 ui/activity/FastSearchActivity.java"""
 
@@ -64,6 +96,8 @@ class Page(tk.Frame):
         self._token = 0  # 搜索代次：切换关键词后旧结果作废
         self._restore_state = dict(restore_state or {})
         self._pending_filter = self._restore_state.get("filter", "all")
+        self._sug_job = None     # 输入防抖定时器
+        self._sug_token = 0      # 联想请求代次：输入变了旧结果作废
 
         back = FocusLabel(self, text="←", font=tv_font(14, True),
                           on_select=self._back)
@@ -79,8 +113,13 @@ class Page(tk.Frame):
                            insertbackground=FG, relief="flat", width=30)
         self.kw.pack(side="left", ipady=5, padx=6)
         self.kw.bind("<Return>", lambda e: self.do_search())
+        self.kw.bind("<KeyRelease>", self._on_kw_key)
         FocusLabel(top, text="搜索", bg=BLUE, fg="#FFFFFF", font=tv_font(13, True),
                    on_select=self.do_search).pack(side="left", padx=8)
+
+        # 首字母联想（对应原版 loadRec：输入拼音首字母 → 猜你想搜）
+        self.sug_bar = tk.Frame(self, bg=BG)
+        self.sug_bar.pack(fill="x", padx=60)
 
         # 分词 chips（点击换词重搜，对应 mGridViewWordFenci）
         self.chip_bar = tk.Frame(self, bg=BG)
@@ -160,6 +199,13 @@ class Page(tk.Frame):
     def destroy(self):
         self._searching = False
         self._token += 1
+        self._sug_token += 1
+        if self._sug_job:
+            try:
+                self.after_cancel(self._sug_job)
+            except Exception:
+                pass
+            self._sug_job = None
         try:
             self.unbind_all("<MouseWheel>")
         except Exception:
@@ -184,6 +230,74 @@ class Page(tk.Frame):
         self.kw.delete(0, "end")
         self.kw.insert(0, word)
         self.do_search()
+
+    # ── 拼音首字母联想（对应 SearchActivity.loadRec / PinyinAdapter）──
+    def _on_kw_key(self, e=None):
+        keysym = getattr(e, "keysym", "") if e is not None else ""
+        if keysym in ("Return", "KP_Enter", "Escape"):  # 回车直接搜索，不联想
+            return
+        if self._sug_job:
+            try:
+                self.after_cancel(self._sug_job)
+            except Exception:
+                pass
+            self._sug_job = None
+        text = self.kw.get().strip()
+        if not text:
+            self._sug_token += 1
+            self._render_suggest([])
+            return
+        self._sug_job = self.after(300, lambda t=text: self._load_suggest(t))
+
+    def _load_suggest(self, text):
+        self._sug_job = None
+        try:
+            if not self.winfo_exists() or self.kw.get().strip() != text:
+                return
+        except tk.TclError:
+            return
+        self._sug_token += 1
+        token = self._sug_token
+        threading.Thread(target=self._suggest_run,
+                         args=(text, token), daemon=True).start()
+
+    def _suggest_run(self, text, token):
+        words = []
+        try:
+            r = apiconfig.SESSION.get(
+                SUGGEST_URL,
+                params={"format": "json", "page_num": 0,
+                        "page_size": 20, "key": text},
+                timeout=6, verify=False)
+            if r.status_code == 200:
+                words = parse_suggestions(r.json())
+        except Exception:
+            words = []
+        if self._sug_token != token:
+            return
+        ui_thread.run(lambda: self._show_suggest(words, text, token))
+
+    def _show_suggest(self, words, text, token):
+        try:
+            if (self._sug_token != token or not self.winfo_exists()
+                    or self.kw.get().strip() != text):
+                return
+        except tk.TclError:
+            return
+        self._render_suggest(words)
+
+    def _render_suggest(self, words):
+        for w in self.sug_bar.winfo_children():
+            w.destroy()
+        if not words:
+            return
+        tk.Label(self.sug_bar, text="猜你想搜", bg=BG, fg=FG_DIM,
+                 font=tv_font(10)).pack(side="left", padx=(2, 6))
+        for word in words[:12]:
+            FocusLabel(self.sug_bar, text=word[:20], bg=PANEL, fg=FG,
+                       font=tv_font(10), pady=2,
+                       on_select=lambda w0=word: self._search_word(w0)
+                       ).pack(side="left", padx=3, pady=2)
 
     # ── 状态栏（对应 updateSearchStatus 两行文案）──
     def _set_status(self, line1, line2):
@@ -212,6 +326,15 @@ class Page(tk.Frame):
         kw = self.kw.get().strip()
         if not kw:
             return
+        # 开始搜索后收起联想，避免旧输入的结果继续弹出
+        if self._sug_job:
+            try:
+                self.after_cancel(self._sug_job)
+            except Exception:
+                pass
+            self._sug_job = None
+        self._sug_token += 1
+        self._render_suggest([])
         hist = hawk.get(hawk.SEARCH_HISTORY, [])
         if kw not in hist:
             hist.insert(0, kw)
