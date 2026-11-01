@@ -1,5 +1,9 @@
 # TVBox4Win — TVBox 复刻（Python 版）
 
+> **背景**：原版 TVBox 是安卓应用，装到手机上要通讯录、地理位置、设备信息等一堆权限，很多人已经不愿意装了；
+> 想在电脑上找一份功能完整的桌面复刻，一直找不到。过去卡在「工作量太大」——这次借助 AI Agent 结对开发才真正做出来。
+> 欢迎 **star / fork / PR**，一起把它磨完整。完整说明见[仓库根目录 README](../README.md)。
+
 用 **Python 3 + tkinter + libmpv** 在 Windows 桌面上复刻 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC)（安卓 TV 端影视聚合播放器）的核心功能：
 
 - **接口配置加载**：兼容 TVBox 各类配置（纯 JSON / 带 BOM / 文本内嵌 JSON），站点、直播、解析、spider 全解析
