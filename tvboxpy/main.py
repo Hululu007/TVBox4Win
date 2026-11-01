@@ -64,15 +64,9 @@ def smoke_test():
         return False
 
     ok = wait_playback()
-    pos, dur, paused = page.player.status() if page.player else (0, 0, True)
-    lines = [
-        "player_backend: %s" % getattr(player_mod, "_MAC_BACKEND", "libmpv"),
-        "position: %.1f" % pos,
-        "duration: %.1f" % dur,
-        "decode_ok: %s" % ("YES" if ok else "NO"),
-    ]
+    _, dur0, _ = page.player.status() if page.player else (0, 0, True)
     if page.player:
-        page.player.seek(max(0, min(dur - 5, 30)))
+        page.player.seek(max(0, min(dur0 - 5, 30)))
     # 拖动后 HLS 要重新取分片，同样轮询而不是固定等 2 秒
     ok_seek = False
     end = time.time() + 15
@@ -82,7 +76,15 @@ def smoke_test():
         if page.player and page.player.status()[0] > 5.0:
             ok_seek = True
             break
-    lines.append("seek_ok: %s" % ("YES" if ok_seek else "NO"))
+    # 放在最后读：刚出画面时 AVPlayer 可能还没报出总时长
+    pos, dur, _ = page.player.status() if page.player else (0, 0, True)
+    lines = [
+        "player_backend: %s" % getattr(player_mod, "_MAC_BACKEND", "libmpv"),
+        "position: %.1f" % pos,
+        "duration: %.1f" % dur,
+        "decode_ok: %s" % ("YES" if ok else "NO"),
+        "seek_ok: %s" % ("YES" if ok_seek else "NO"),
+    ]
     from tvboxosc.paths import data_path
     out = data_path("smoke_result.txt")
     with open(out, "w", encoding="utf-8") as f:
