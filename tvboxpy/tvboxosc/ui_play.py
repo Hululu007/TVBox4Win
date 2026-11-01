@@ -11,19 +11,72 @@ from .player import MpvPlayer
 CHROME_BG = "#0B0F1C"   # 控制栏底色（近黑，覆在视频上）
 BTN_BG = "#26325C"      # 按钮底色（theme.PANEL_HI）
 
+# 起播看门狗：play() 后这么久还没出画面就当失败（对应原版解析超时 20s）
+START_TIMEOUT_MS = 20000
+# 解析看门狗：解析接口卡住超过这么久也当失败，避免「正在获取播放信息」无限等
+RESOLVE_TIMEOUT_MS = 20000
+
+
+class Failover:
+    """播放失败后的重试/换线路决策（对应 PlayFragment.autoRetry + tryNextLineIfEnabled）
+
+    与原版差异：桌面端只有一个播放内核，没有「换内核重试」这一步，所以先在本线路
+    重载一次，再依次尝试其它线路的同一集；全部试完才交给用户手动重试。
+    """
+
+    def __init__(self, line_count, retry_same=1):
+        self.line_count = max(1, int(line_count or 1))
+        self.retry_same = retry_same
+        self.reset()
+
+    def reset(self):
+        self.retries = 0
+        self.failed = set()
+
+    def next_action(self, line_index, ep_index, ep_counts):
+        """返回 ("retry", None) / ("switch", 线路下标) / ("give_up", None)"""
+        if self.retries < self.retry_same:
+            self.retries += 1
+            return "retry", None
+        self.failed.add(line_index)
+        for off in range(1, self.line_count):
+            li = (line_index + off) % self.line_count
+            if li in self.failed:
+                continue
+            if ep_index >= (ep_counts[li] if li < len(ep_counts) else 0):
+                continue  # 该线路没有这一集
+            self.retries = 0
+            return "switch", li
+        return "give_up", None
+
+
+def _short_reason(text, limit=24):
+    """异常信息压成一行短提示（完整内容仍写 error.log）"""
+    s = " ".join(str(text or "播放失败").split())
+    return s[:limit] + ("…" if len(s) > limit else "")
+
 
 class Page(tk.Frame):
     """对应 ui/activity/PlayActivity.java"""
 
     def __init__(self, master, app, source_key, vod_id, vod_name,
                  play_flag, play_ep, play_url, series=None, ep_index=0,
-                 vod_pic=""):
+                 vod_pic="", all_flags=None, all_urls=None, line_index=None):
         super().__init__(master, bg="#000000")
         self.app = app
         self.source_key, self.vod_id, self.vod_name = source_key, vod_id, vod_name
         self.vod_pic = vod_pic  # 写历史记录用（首页「观看历史」推荐位显示海报）
         self.play_flag, self.ep_index = play_flag, ep_index
         self.series = series  # ((flag, names), urls)
+        # 详情页传入的全部线路：(flags, urls)，用于播放失败时自动换线
+        self.all_flags = all_flags or []
+        self.all_urls = all_urls or []
+        self.line_index = line_index if isinstance(line_index, int) else 0
+        self._failover = Failover(len(self.all_urls))
+        self._cur_ep_url = play_url
+        self._started = False       # 本次尝试是否真正出过画面
+        self._watchdog = None       # 起播超时看门狗
+        self._resolve_job = None    # 解析超时看门狗
         self.player = None
         self._pos_job = None
         self._hdr = None
@@ -69,6 +122,8 @@ class Page(tk.Frame):
         self.status = tk.Label(self, text="", bg="#000000", fg=FG_DIM,
                                font=tv_font(12))
         self.status.place(relx=0.5, rely=0.86, anchor="center")
+        # 失败提示可点击重试（对应原版 setTip 的点击重播）
+        self.status.bind("<Button-1>", self._retry_now)
 
         # 沉浸式控制栏：无操作 4 秒后隐藏，鼠标移动/按键/点击唤出
         for seq in ("<Motion>", "<Any-KeyPress>", "<Button-1>"):
@@ -142,6 +197,8 @@ class Page(tk.Frame):
 
         if self.series:
             self._mk_btn(row, "选集", self._show_series, side="right")
+        if len(self.all_urls) > 1:
+            self._mk_btn(row, "线路", self._show_lines, side="right")
         self.speed_btn = FocusLabel(row, text="倍速 1.0x", font=tv_font(12),
                                     bg=BTN_BG, fg="#FFFFFF",
                                     on_select=self._cycle_speed, padx=14, pady=5)
@@ -227,13 +284,16 @@ class Page(tk.Frame):
                 pass
         self._app_binds = []
         for job in (getattr(self, "_pos_job", None), getattr(self, "_seek_job", None),
-                    getattr(self, "_save_job", None), getattr(self, "_hide_job", None)):
+                    getattr(self, "_save_job", None), getattr(self, "_hide_job", None),
+                    getattr(self, "_watchdog", None), getattr(self, "_resolve_job", None)):
             if job:
                 try:
                     self.after_cancel(job)
                 except Exception:
                     pass
         self._pos_job = self._seek_job = self._save_job = self._hide_job = None
+        self._watchdog = None
+        self._resolve_job = None
         try:
             if self.player:
                 self.player.detach()
@@ -364,20 +424,35 @@ class Page(tk.Frame):
         except OSError as e:
             self.status.configure(text=f"播放器初始化失败：{e}")
             return
-        # 解析含网络请求（分享页嗅探等），放后台线程，避免 UI 卡「没反应」
         self._seq += 1
-        seq = self._seq
-        self.status.configure(text="正在获取播放信息...")
+        self._load(play_url, self._seq)
+
+    def _load(self, url, seq, status="正在获取播放信息..."):
+        """解析 + 播放一次（解析含网络请求，放后台线程，避免 UI 卡「没反应」）"""
+        if seq != self._seq:
+            return  # 迟到的重试/换线（用户已切集或返回）
+        self._cur_ep_url = url
+        self._started = False
+        self.status.configure(text=status)
+        self._cancel_resolve()
+        self._resolve_job = self.after(
+            RESOLVE_TIMEOUT_MS, lambda: self._check_resolve(seq))
         def work():
-            real, hdr = self._resolve(play_url)
-            ui_thread.run(lambda: self._do_play(real, hdr, seq, first=True))
+            real, hdr = self._resolve(url)
+            if not str(real or "").strip():
+                ui_thread.run(lambda: self._handle_fail("获取播放地址为空", seq))
+                return
+            ui_thread.run(lambda: self._do_play(real, hdr, seq))
         threading.Thread(target=work, daemon=True).start()
 
-    def _do_play(self, real, hdr, seq, first=False):
+    def _do_play(self, real, hdr, seq):
         if seq != self._seq or self.player is None:
             return  # 页面已切集/返回
+        self._cancel_resolve()
         self._hdr = hdr
         self._last_real = real
+        self._started = False
+        self._arm_watchdog(seq)
         self.player.apply_codec(self.player.mpv)
         self.player.apply_scale(self.player.mpv)
         self.player.play(real, hdr)
@@ -391,8 +466,17 @@ class Page(tk.Frame):
                 except Exception:
                     pass
             self._seek_job = self.after(1500, lambda: self.player.seek(prog["pos"]))
+        # 每次起播只保留一条轮询链：重试/换线会重新 _do_play，
+        # 旧链若不取消，会和新的并跑（进度条抖动、自动连播可能触发两次）
+        if self._pos_job:
+            try:
+                self.after_cancel(self._pos_job)
+            except Exception:
+                pass
+            self._pos_job = None
         self._poll_pos()
-        if first:  # 周期性保存进度（对应内核定期 saveProgress）
+        # 周期性保存进度（对应内核定期 saveProgress）；换线/重试后仍继续
+        if self._save_job is None:
             self._save_job = self.after(10000, self._auto_save)
 
     def _auto_save(self):
@@ -404,11 +488,23 @@ class Page(tk.Frame):
         self._save_job = self.after(10000, self._auto_save)
 
     def _poll_pos(self):
+        self._pos_job = None
         if not self.player:
             return
         pos, dur, pause = self.player.status()
+        # 真正出过画面：清掉失败记忆，避免以后偶发失败时误判线路不可用
+        if pos > 1.0 and not self._started:
+            self._started = True
+            self._failover.reset()
+            # 看门狗判失败后又迟到起播的流：把 ⚠ 提示收掉，别一直挂在画面上
+            try:
+                if self.status.cget("text").startswith("⚠"):
+                    self.status.configure(text="")
+            except Exception:
+                pass
         # 自动连播（对应 Java playNext：播完自动下一集）
-        if self.player.is_eof() and self.series:
+        # 必须确认本集真播过，否则打开失败时的 eof 会被当成「播完」直接跳集
+        if self.player.is_eof() and self.series and self._started:
             urls = self.series[1]
             if self.ep_index < len(urls) - 1:
                 nxt = self.ep_index + 1
@@ -426,9 +522,13 @@ class Page(tk.Frame):
         if not self._seeking:
             self._draw_seek(self._cur_pos, self._dur)
         self.play_btn.configure(text="▶ 播放" if pause else "⏸ 暂停")
-        # 起播后清掉「正在获取播放信息」提示
-        if self._cur_pos > 0.5 and self.status.cget("text") == "正在获取播放信息...":
-            self.status.configure(text="")
+        # 起播后清掉加载/重试/换线提示（别把「已暂停」等用户提示也清掉）
+        if self._cur_pos > 0.5:
+            txt = self.status.cget("text")
+            if (txt == "正在获取播放信息..." or txt.startswith("播放失败，正在重试")
+                    or txt.startswith("本线路播放失败")
+                    or txt.startswith("正在切换线路")):
+                self.status.configure(text="")
         if self._t_start and self._cur_pos > 0.5:
             if os.environ.get("TVBOXPY_DEBUG"):
                 print("[startup] click->first frame: %.1fs"
@@ -468,20 +568,145 @@ class Page(tk.Frame):
             if pos > 0:
                 store.save_progress(self._last_real, pos, dur or 0)
         self.ep_index = idx
-        # 顶部信息栏跟着切集更新（对应原版 tv_info_name1）
+        self._failover.reset()  # 用户主动换集：重新给所有线路机会
+        self._update_info()
+        self._seq += 1
+        self._load(url, self._seq)
+
+    def _update_info(self):
+        """顶部信息栏：片名 · 线路 · 集名（对应原版 tv_info_name1）"""
         try:
-            self.info_lbl.configure(
-                text=f"{self.vod_name} · {self.play_flag} · "
-                     f"{self.series[0][1][idx] if self.series else ''}")
+            name = (self.series[0][1][self.ep_index]
+                    if self.series and self.ep_index < len(self.series[0][1]) else "")
+            self.info_lbl.configure(text=f"{self.vod_name} · {self.play_flag} · {name}")
         except Exception:
             pass
+
+    # ---- 播放失败容错（对应原版 handleResolvePlayUrlFailed / autoRetry） ----
+
+    def _arm_watchdog(self, seq):
+        self._cancel_watchdog()
+        self._watchdog = self.after(
+            START_TIMEOUT_MS, lambda: self._check_watchdog(seq))
+
+    def _cancel_watchdog(self):
+        if self._watchdog:
+            try:
+                self.after_cancel(self._watchdog)
+            except Exception:
+                pass
+        self._watchdog = None
+
+    def _check_resolve(self, seq):
+        """解析超时：后台线程可能还卡在网络请求上，靠 seq 丢弃它的迟到结果"""
+        self._resolve_job = None
+        if seq != self._seq:
+            return
+        self._handle_fail("解析超时", seq)
+
+    def _cancel_resolve(self):
+        if self._resolve_job:
+            try:
+                self.after_cancel(self._resolve_job)
+            except Exception:
+                pass
+        self._resolve_job = None
+
+    def _check_watchdog(self, seq):
+        self._watchdog = None
+        if seq != self._seq or not self.player:
+            return
+        if self._started:
+            return  # 已出画面，起播看门狗到此为止
+        pos, _dur, pause = self.player.status()
+        if pos > 1.0:
+            return
+        if pause:
+            return  # 用户自己按了暂停，不算失败
+        self._handle_fail("播放超时", seq)
+
+    def _handle_fail(self, reason, seq=None):
+        """解析为空 / 起播超时：同线路重载 → 换线路 → 交给用户点击重试"""
+        if seq is not None and seq != self._seq:
+            return
+        if self.player is None:
+            return
+        self._cancel_watchdog()
+        self._cancel_resolve()
+        self._started = False
+        counts = [len(u) for u in self.all_urls]
+        action, target = self._failover.next_action(
+            self.line_index, self.ep_index, counts)
+        if action == "retry":
+            self.status.configure(
+                text=f"播放失败，正在重试…（{_short_reason(reason)}）")
+            self._seq += 1
+            seq2 = self._seq
+            self.after(1000, lambda: self._load(self._cur_ep_url, seq2))
+        elif action == "switch":
+            self.status.configure(text="本线路播放失败，正在切换线路…")
+            self.after(600, lambda: self._switch_line(target, auto=True))
+        else:
+            self.status.configure(
+                text=f"⚠ 播放失败（{_short_reason(reason)}），点击重试")
+            from .paths import log_error
+            log_error("[play] 所有线路均播放失败", reason)
+
+    def _switch_line(self, li, auto=False, ep_index=None):
+        """切到另一条线路的同一集（自动容错或用户手动选择）"""
+        if not (0 <= li < len(self.all_urls)):
+            return
+        urls = self.all_urls[li]
+        idx = self.ep_index if ep_index is None else ep_index
+        if not urls or idx >= len(urls):
+            return
+        self.line_index = li
+        self.series = (self.all_flags[li], urls)
+        self.play_flag = self.all_flags[li][0]
+        self.ep_index = idx
+        if not auto:
+            self._failover.reset()
+        self._update_info()
         self._seq += 1
-        seq = self._seq
-        self.status.configure(text="正在获取播放信息...")
-        def work():
-            real, hdr = self._resolve(url)
-            ui_thread.run(lambda: self._do_play(real, hdr, seq))
-        threading.Thread(target=work, daemon=True).start()
+        self._load(urls[idx], self._seq,
+                   status="正在获取播放信息..." if not auto
+                   else "正在切换线路...")
+
+    def _show_lines(self):
+        """线路选择面板（对应原版线路切换）"""
+        if len(self.all_urls) < 2:
+            return
+        panel = tk.Toplevel(self)
+        panel.title("线路")
+        panel.configure(bg="#101010")
+        try:
+            panel.attributes("-topmost", True)
+        except Exception:
+            pass
+        for i, (flag, _names) in enumerate(self.all_urls):
+            FocusLabel(
+                panel, text=(flag or f"线路{i + 1}")[:14],
+                bg="#FF5722" if i == self.line_index else "#1E1E1E",
+                fg=FG, font=tv_font(11),
+                on_select=lambda ii=i, p=panel: self._pick_line(p, ii)
+            ).grid(row=i // 6, column=i % 6, padx=5, pady=5)
+
+    def _pick_line(self, panel, li):
+        panel.destroy()
+        urls = self.all_urls[li]
+        if urls:
+            self._switch_line(li, ep_index=min(self.ep_index, len(urls) - 1))
+
+    def _retry_now(self, _e=None):
+        """点击状态提示重试当前集（对应原版 setTip 点击重播）"""
+        try:
+            if not self.status.cget("text").startswith("⚠"):
+                return
+        except Exception:
+            return
+        self._failover.reset()
+        self._seq += 1
+        self._load(self._cur_ep_url, self._seq)
 
     def _back(self, _e=None):
         """返回详情页。UI 立即切换，mpv 停止与历史写库放到后台线程，
@@ -498,13 +723,15 @@ class Page(tk.Frame):
 
         # 1) 停掉定时任务（必须在切页前，否则回调打到已销毁的控件）
         for job in (self._pos_job, self._seek_job, self._save_job,
-                    self._hide_job):
+                    self._hide_job, self._watchdog, self._resolve_job):
             if job:
                 try:
                     self.after_cancel(job)
                 except Exception:
                     pass
         self._pos_job = self._seek_job = self._save_job = self._hide_job = None
+        self._watchdog = None
+        self._resolve_job = None
 
         # 恢复进入播放页前的窗口状态（退出全屏沉浸）
         try:

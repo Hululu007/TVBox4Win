@@ -350,7 +350,11 @@ class Page(tk.Frame):
                         play_ep=ep_name, play_url=play_url,
                         series=(self.info["series_flags"][self.cur_flag],
                                 self.info["series_urls"][self.cur_flag]),
-                        ep_index=ep_index, vod_pic=self.info.get("pic") or "")
+                        ep_index=ep_index, vod_pic=self.info.get("pic") or "",
+                        # 全部线路：播放失败时自动换线（对应原版 tryNextLineIfEnabled）
+                        all_flags=self.info["series_flags"],
+                        all_urls=self.info["series_urls"],
+                        line_index=self.cur_flag)
 
     def _collect(self):
         on = store.save_collect(self.source_key, self.vod_id, self.info["name"],
