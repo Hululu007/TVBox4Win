@@ -171,13 +171,19 @@ class ApiConfig:
         return None
 
     def load(self, api_url, ok_cb, err_cb=None):
-        """对应 ApiConfig.load()：加载并解析配置，回调式（线程内执行）
-        网络失败时回退读本地缓存（对应 Java onError 读缓存配置）"""
+        """对应 ApiConfig.load()：加载并解析配置，回调式（网络在后台线程）
+
+        回调统一经 ui_thread 回主线程执行：Tk 只允许主线程建/改控件，
+        macOS（Tk 9）在后台线程建控件会直接 Bus error 崩溃。"""
+        def _ui(cb, *args):
+            from . import ui_thread
+            if cb:
+                ui_thread.run(lambda: cb(*args))
+
         def run():
             if not self.load_lock.acquire(blocking=False):
                 # 已有加载在跑：静默 return 会让调用方毫无反馈，必须报错
-                if err_cb:
-                    err_cb("已有配置正在加载，请稍候再试")
+                _ui(err_cb, "已有配置正在加载，请稍候再试")
                 return
             try:
                 req_url = clan_to_address(api_url)
@@ -199,8 +205,7 @@ class ApiConfig:
                         text = None
                 cfg = extract_json(text) if text else None
                 if cfg is None:
-                    if err_cb:
-                        err_cb("配置加载失败" + ("（已无缓存可用）" if from_cache else ""))
+                    _ui(err_cb, "配置加载失败" + ("（已无缓存可用）" if from_cache else ""))
                     return
                 self._parse(cfg, req_url)
                 # 记录历史（对应 ApiHistoryDialogAdapter 数据）
@@ -210,11 +215,9 @@ class ApiConfig:
                     hawk.put(hawk.API_HISTORY, hist[:10])
                 hawk.put(hawk.HOME_API, req_url)
                 self.last_from_cache = from_cache
-                if ok_cb:
-                    ok_cb()
+                _ui(ok_cb)
             except Exception as e:      # 线程里抛异常会静默丢失，转成回调告知界面
-                if err_cb:
-                    err_cb(f"配置加载异常：{e}")
+                _ui(err_cb, f"配置加载异常：{e}")
             finally:
                 self.load_lock.release()
         threading.Thread(target=run, daemon=True).start()

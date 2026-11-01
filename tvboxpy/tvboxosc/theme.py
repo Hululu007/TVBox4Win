@@ -42,9 +42,33 @@ class FocusLabel(tk.Label):
             self.on_select()
 
 
+_FONT_FAMILY = None
+
+
+def _pick_family():
+    """跨平台中文字体：macOS 用苹方，Windows 用雅黑，都缺失时交给 Tk 默认字体"""
+    global _FONT_FAMILY
+    if _FONT_FAMILY:
+        return _FONT_FAMILY
+    import sys
+    cands = (["PingFang SC", "Hiragino Sans GB", "Heiti SC", "Songti SC"]
+             if sys.platform == "darwin"
+             else ["Microsoft YaHei UI", "Microsoft YaHei", "SimHei"])
+    try:
+        have = set(tkfont.families())
+        for name in cands:
+            if name in have:
+                _FONT_FAMILY = name
+                break
+    except Exception:
+        pass
+    if not _FONT_FAMILY:
+        _FONT_FAMILY = cands[0]
+    return _FONT_FAMILY
+
+
 def tv_font(size=13, bold=False):
-    fam = "Microsoft YaHei UI"
-    return (fam, size, "bold" if bold else "normal")
+    return (_pick_family(), size, "bold" if bold else "normal")
 
 
 def grid_key_nav(widgets, cols, up_down_rows=1):

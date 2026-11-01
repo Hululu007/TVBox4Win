@@ -5,6 +5,7 @@
 # ---------- 构建产物 ----------
 build/
 dist/
+.venv/
 **/__pycache__/
 *.py[cod]
 *.spec.bak
@@ -46,3 +47,7 @@ desktop.ini
 .idea/
 .vscode/
 *.swp
+
+# ---------- 自检产物 ----------
+check_result.txt
+smoke_result.txt

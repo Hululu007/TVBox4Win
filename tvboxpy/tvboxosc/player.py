@@ -7,13 +7,24 @@ been shutdown），且多实例会竞争音频设备。因此这里用进程级�
 import os
 import sys
 
-_DLL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "third_party", "mpv")
-os.environ["PATH"] = _DLL_DIR + os.pathsep + os.environ.get("PATH", "")
-if getattr(sys, "_MEIPASS", None):
-    os.environ["PATH"] = sys._MEIPASS + os.pathsep + os.environ["PATH"]
+# macOS 的 vo(cocoa) 不支持 wid 嵌入，改用「独立 mpv 进程 + IPC」后端，
+# 详见 player_mac.py；Windows 仍走 libmpv 的 dll + wid 嵌入。
+IS_MAC = sys.platform == "darwin"
 
-import mpv  # noqa: E402
+if IS_MAC:
+    from .player_mac import MpvProcess, find_mpv  # noqa: E402
+    from .player_av import AvCore  # noqa: E402
+
+    _MAC_BACKEND = None      # "mpv" | "av"，首次播放时探测一次并缓存
+else:
+    _DLL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "third_party", "mpv")
+    os.environ["PATH"] = _DLL_DIR + os.pathsep + os.environ.get("PATH", "")
+    if getattr(sys, "_MEIPASS", None):
+        os.environ["PATH"] = sys._MEIPASS + os.pathsep + os.environ["PATH"]
+
+    import mpv  # noqa: E402
+
 import threading  # noqa: E402
 
 
@@ -21,15 +32,82 @@ class MpvPlayer:
     _shared = None          # 进程级共享核心
     _core_lock = threading.Lock()
 
-    def __init__(self, wid: int):
-        self._wid = int(wid)
-        self.mpv = self._get_core(self._wid)
+    def __init__(self, wid, insets=(0, 0, 0, 0)):
+        """wid 可传 tkinter 控件或整数窗口 id；insets=(上,右,下,左) 是页面自绘
+        控制栏占用的边距，macOS 摆放 mpv 窗口时扣除，避免盖住按钮"""
+        self._widget = wid if hasattr(wid, "winfo_id") else None
+        self._wid = (int(wid.winfo_id()) if self._widget is not None
+                     else int(wid))
+        self._insets = insets
+        self.mpv = self._get_core(self._wid, self._rect())
         self._last_url = None
+        self._geom_job = None
+        if IS_MAC and self._widget is not None:
+            try:
+                self._widget.bind("<Configure>", self._on_configure, add="+")
+                # 容器被销毁时收起独立播放窗口，避免黑框留在桌面上
+                self._widget.bind("<Destroy>", self._on_destroy, add="+")
+            except Exception:
+                pass
+            try:
+                self._widget.winfo_toplevel().bind(
+                    "<Configure>", self._on_configure, add="+")
+            except Exception:
+                pass
+
+    def _rect(self):
+        """视频容器的屏幕矩形（已扣除 insets）；拿不到就返回 None"""
+        w = self._widget
+        if w is None:
+            return None
+        try:
+            w.update_idletasks()
+            top, right, bottom, left = self._insets
+            x = w.winfo_rootx() + left
+            y = w.winfo_rooty() + top
+            cw = w.winfo_width() - left - right
+            ch = w.winfo_height() - top - bottom
+            if cw < 32 or ch < 32:
+                return None
+            return (x, y, cw, ch)
+        except Exception:
+            return None
+
+    def _on_configure(self, _e=None):
+        """页面尺寸变化（含进出全屏）时把 mpv 窗口重新对齐，节流到 80ms"""
+        if self._geom_job is not None:
+            return
+        try:
+            self._geom_job = self._widget.after(80, self._sync_geometry)
+        except Exception:
+            self._geom_job = None
+
+    def _sync_geometry(self):
+        self._geom_job = None
+        rect = self._rect()
+        if rect and self._shared is not None:
+            try:
+                self._shared.set_rect(*rect)
+            except Exception:
+                pass
+
+    def _on_destroy(self, e=None):
+        """视频容器被销毁：收起独立播放窗口（Windows 下由 detach 改 wid 处理）"""
+        if e is not None and getattr(e, "widget", None) is not self._widget:
+            return  # 子控件销毁事件，忽略
+        try:
+            if self._shared is not None:
+                self._shared.hide()
+        except Exception:
+            pass
 
     @classmethod
     def warmup(cls):
         """预热 mpv 核心（启动时后台调用）：DLL 加载 + 核心 init 是首次点播放
         时 1~2 秒的固定开销，提前做掉，点击即可立即 loadfile"""
+        if IS_MAC:
+            # macOS 是独立进程，启动很快，提前拉进程反而会闪一个空窗口
+            return find_mpv() is not None
         try:
             cls._get_core(0)
             return True
@@ -37,9 +115,49 @@ class MpvPlayer:
             return False
 
     @classmethod
-    def _get_core(cls, wid):
+    def _mac_make_core(cls, rect):
+        """选后端：mpv 能起来就用 mpv（格式最全），否则退回系统 AVFoundation"""
+        global _MAC_BACKEND
+        if _MAC_BACKEND is None:
+            import os as _os
+            force = _os.environ.get("TVBOX_PLAYER", "").lower()
+            if force == "av":
+                _MAC_BACKEND = "av"
+            elif find_mpv() is None:
+                _MAC_BACKEND = "av"
+            else:
+                try:
+                    probe = MpvProcess(rect)
+                    _MAC_BACKEND = "mpv"
+                    return probe
+                except Exception:
+                    _MAC_BACKEND = "av"
+        try:
+            if _MAC_BACKEND == "mpv":
+                return MpvProcess(rect)
+        except Exception:
+            _MAC_BACKEND = "av"
+        return AvCore(rect)
+
+    @classmethod
+    def _get_core(cls, wid, rect=None):
         """复用现有核心；核心已 shutdown 则重建。切换嵌入窗口用运行时改 wid"""
         with cls._core_lock:
+            if IS_MAC and cls._shared is not None:
+                if not cls._shared.alive():
+                    try:
+                        cls._shared.terminate()
+                    except Exception:
+                        pass
+                    cls._shared = None
+                else:
+                    if rect:
+                        try:
+                            cls._shared.set_rect(*rect)
+                        except Exception:
+                            pass
+                    cls._shared.show()
+                    return cls._shared
             if cls._shared is not None:
                 try:
                     _ = cls._shared.idle_active  # 探测核心是否存活
@@ -54,6 +172,9 @@ class MpvPlayer:
                     except Exception:
                         pass
                     cls._shared = None
+            if IS_MAC:
+                cls._shared = cls._mac_make_core(rect)
+                return cls._shared
             # osc=no：播放页自带控制栏（原版 bottom_container），避免双进度条
             # network_timeout：网络流挂死保护；实测 cache=yes 反而拖慢起播
             # （mpv 默认 cache 策略最快），故不加
@@ -102,7 +223,7 @@ class MpvPlayer:
 
     def play(self, url, headers=None):
         # 页面复用/核心重建后，确保拿到可用核心
-        self.mpv = self._get_core(self._wid)
+        self.mpv = self._get_core(self._wid, self._rect())
         self._last_url = url
         try:
             if headers:
@@ -205,7 +326,14 @@ class MpvPlayer:
 
     def detach(self):
         """把 mpv 从当前嵌入窗口解绑（wid=0）。
-        页面销毁后若 mpv 仍向失效 HWND 渲染，会拖住核心甚至卡死 UI 线程"""
+        页面销毁后若 mpv 仍向失效 HWND 渲染，会拖住核心甚至卡死 UI 线程。
+        macOS 没有嵌入窗口，改为把独立 mpv 窗口收起，避免黑框留在桌面上"""
+        if IS_MAC:
+            try:
+                self._shared.hide()
+            except Exception:
+                pass
+            return
         try:
             self.mpv["wid"] = "0"
         except Exception:
@@ -218,6 +346,11 @@ class MpvPlayer:
             self.mpv.command("stop")
         except Exception:
             pass
+        if IS_MAC:
+            try:
+                self._shared.hide()
+            except Exception:
+                pass
 
     @classmethod
     def shutdown(cls):

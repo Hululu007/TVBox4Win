@@ -43,6 +43,13 @@ class App(tk.Tk):
             pass
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def attributes(self, *args):
+        """兼容层：Tk 9（macOS）要求属性名带前导横线，Windows 上不带也行。
+        统一把 "fullscreen" 规范成 "-fullscreen"，各页面无需分别处理"""
+        if args and args[0] == "fullscreen":
+            args = ("-fullscreen",) + args[1:]
+        return super().attributes(*args)
+
     def _on_close(self):
         """退出清理：回收 node/java 爬虫子进程（否则越积越多，越用越卡）"""
         try:

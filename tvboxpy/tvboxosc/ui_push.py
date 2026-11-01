@@ -238,7 +238,7 @@ class Page(tk.Frame):
             self.player.terminate()
             self.player = None
         self.update_idletasks()
-        self.player = MpvPlayer(int(video.winfo_id()))
+        self.player = MpvPlayer(video)
         self.player.play(url)
 
     def _stop_and_list(self):

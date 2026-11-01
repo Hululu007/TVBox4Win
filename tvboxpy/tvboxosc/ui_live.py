@@ -513,7 +513,8 @@ class Page(tk.Frame):
         try:
             self.update_idletasks()
             if not self.player:
-                self.player = MpvPlayer(self.video.winfo_id())
+                self.player = MpvPlayer(
+                    self.video, insets=(self.TOP_H, 0, self.BAR_H, 0))
                 self._raise_chrome()   # mpv 视频窗口会盖住后 place 的面板，必须重置 z 序
             self.player.play(u)
         except Exception as e:

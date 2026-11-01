@@ -215,8 +215,39 @@ class Page(tk.Frame):
         self._show_chrome()
         return "break"
 
+    def destroy(self):
+        """页面被销毁时统一收尾：解绑全局快捷键、停掉定时任务、解绑播放器。
+
+        不这样做的话，已销毁页面上的 after 回调/全局 <Motion> 绑定还会被触发，
+        报 "bad window path name"（macOS 上更明显，因为播放窗口是独立窗口）"""
+        for seq, fid in getattr(self, "_app_binds", []):
+            try:
+                self.app.unbind(seq, fid)
+            except Exception:
+                pass
+        self._app_binds = []
+        for job in (getattr(self, "_pos_job", None), getattr(self, "_seek_job", None),
+                    getattr(self, "_save_job", None), getattr(self, "_hide_job", None)):
+            if job:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+        self._pos_job = self._seek_job = self._save_job = self._hide_job = None
+        try:
+            if self.player:
+                self.player.detach()
+        except Exception:
+            pass
+        super().destroy()
+
     def _show_chrome(self, _e=None):
         """唤出控制栏并重置自动隐藏计时（沉浸式，对应原版触摸唤出控制栏）"""
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
         self.top.place(x=0, y=0, relwidth=1.0, height=42)
         self.bottom.place(x=0, rely=1.0, relwidth=1.0, height=96, anchor="sw")
         self.top.lift()
@@ -310,7 +341,7 @@ class Page(tk.Frame):
             return
         # 等 video 布局完成再取 wid
         self.update_idletasks()
-        self.player = MpvPlayer(int(self.video.winfo_id()))
+        self.player = MpvPlayer(self.video, insets=(42, 0, 96, 0))
 
     def _resolve(self, url):
         """选集地址 → (真实媒体地址, 请求头)。含网络请求，须在后台线程调用"""
