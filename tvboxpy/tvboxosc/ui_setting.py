@@ -5,12 +5,14 @@
 """
 import os
 import shutil
+import threading
 import tkinter as tk
+from tkinter import filedialog
 
 from . import hawk, ui_thread, VERSION
 from .apiconfig import api_config
 from .theme import (BG, FG, FG_DIM, ACCENT, FOCUS_BG, FOCUS_FG,
-                    FocusLabel, tv_font, PANEL)
+                    FocusLabel, tv_font, PANEL, PANEL_HI)
 
 DEFAULT_API = "https://cyao2q.github.io/files/m.json"
 
@@ -51,6 +53,7 @@ class Page(tk.Frame):
         self._cards = []
         self._row, self._col = 0, 0
         self._add_card(grid, "配置地址", full=True, cb=self._edit_api)
+        self._add_card(grid, "直播地址", full=True, cb=self._edit_live)
         self._add_card(grid, "配置历史", full=True, cb=self._pick_hist)
         self._add_card(grid, "首页站源", cb=self._goto_grid)
         self._add_card(grid, "首页推荐", cb=self._pick_home_rec)
@@ -100,6 +103,8 @@ class Page(tk.Frame):
     def _refresh_values(self):
         api = hawk.get(hawk.HOME_API, DEFAULT_API)
         self._set_value("配置地址", self._short(api))
+        live = str(hawk.get(hawk.LIVE_API_URL, "") or "")
+        self._set_value("直播地址", self._short(live) if live else "跟随配置")
         hist = hawk.get(hawk.API_HISTORY, []) or []
         self._set_value("配置历史", f"{len(hist)} 条" if hist else "")
         self._set_value("首页站源", self._home_source_name())
@@ -145,9 +150,117 @@ class Page(tk.Frame):
             return hawk.DEFAULT_HOME_REC
 
     # ------------------------------------------------ 功能动作 ----
-    def _edit_api(self):
-        self._dialog("配置地址", hawk.get(hawk.HOME_API, DEFAULT_API),
-                     self._load_api)
+    def _edit_api(self, focus_live=False):
+        """配置地址弹窗（对应原版 ApiDialog：点播 + 直播 两行输入 + 直播历史）"""
+        api = hawk.get(hawk.HOME_API, DEFAULT_API)
+        live = str(hawk.get(hawk.LIVE_API_URL, "") or "")
+        self._api_dialog(api, live, self._load_api, focus_live=focus_live)
+
+    def _edit_live(self):
+        self._edit_api(focus_live=True)
+
+    def _save_live(self, url):
+        """保存自定义直播源（对应 HawkConfig.LIVE_API_URL + LIVE_API_HISTORY）"""
+        url = (url or "").strip()
+        if not url:
+            hawk.delete(hawk.LIVE_API_URL)
+            self._refresh_values()
+            self.status.configure(text="直播地址已清空：直播页将使用接口配置里的直播源")
+            return
+        hist = [u for u in (hawk.get(hawk.LIVE_API_HISTORY, []) or []) if u != url]
+        hist.insert(0, url)
+        hawk.put(hawk.LIVE_API_HISTORY, hist[:10])
+        hawk.put(hawk.LIVE_API_URL, url)
+        self._refresh_values()
+        self.status.configure(text=f"直播地址已保存：{url}（正在校验…）")
+
+        # 后台校验能不能解析出频道（不阻塞 UI）
+        def check():
+            from .ui_live import read_live_source, parse_live_source
+            try:
+                name, chs = parse_live_source(read_live_source(url), url)
+            except Exception as e:
+                msg = f"直播地址已保存，但读取失败：{e}"
+                ui_thread.run(lambda: self.status.configure(text=msg))
+                return
+            if chs:
+                msg = f"直播地址已保存：{name or '直播源'} · {len(chs)} 个频道"
+            else:
+                msg = "直播地址已保存，但未解析到频道（可检查地址或格式）"
+            ui_thread.run(lambda: self.status.configure(text=msg))
+        threading.Thread(target=check, daemon=True).start()
+
+    def _pick_live_hist(self):
+        urls = hawk.get(hawk.LIVE_API_HISTORY, []) or []
+        if not urls:
+            self.status.configure(text="暂无直播历史")
+            return
+        self._list_dialog("历史直播", urls, self._save_live)
+
+    def _api_dialog(self, api, live, on_point_ok, focus_live=False):
+        """双输入弹窗：点播地址 + 直播地址（布局对照 dialog_api.xml）"""
+        win = tk.Toplevel(self)
+        win.title("配置地址")
+        win.configure(bg=BG)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+
+        tk.Label(win, text="配置地址", bg=BG, fg=FG, font=tv_font(14, True)
+                 ).pack(padx=20, pady=(14, 2), anchor="w")
+        tk.Label(win, text="点播：TVBox 接口配置地址　　直播：txt/m3u 直播源或含 lives 的配置"
+                           "（留空则跟随接口配置）",
+                 bg=BG, fg=FG_DIM, font=tv_font(10)).pack(padx=20, anchor="w")
+
+        def add_row(label, value):
+            fr = tk.Frame(win, bg=BG)
+            fr.pack(fill="x", padx=20, pady=5)
+            tk.Label(fr, text=label, bg=BG, fg=FG, font=tv_font(11, True),
+                     width=4, anchor="w").pack(side="left")
+            ent = tk.Entry(fr, bg=PANEL, fg=FG, font=("Consolas", 11, ), width=64,
+                           insertbackground=FG, highlightthickness=1,
+                           highlightbackground="#333")
+            ent.insert(0, value)
+            ent.pack(side="left", fill="x", expand=True, padx=(4, 6))
+
+            def browse():
+                p = filedialog.askopenfilename(
+                    parent=win, title=f"选择{label}文件",
+                    filetypes=[("直播/配置文件", "*.txt *.m3u *.m3u8 *.json"),
+                               ("所有文件", "*.*")])
+                if p:
+                    ent.delete(0, "end")
+                    ent.insert(0, p)
+            FocusLabel(fr, text="选择", bg=PANEL_HI, fg=FG, font=tv_font(10),
+                       on_select=browse).pack(side="left")
+            return ent
+
+        ent_api = add_row("点播", api)
+        ent_live = add_row("直播", live)
+
+        def confirm(_e=None):
+            a = ent_api.get().strip()
+            l = ent_live.get().strip()
+            win.destroy()
+            self._save_live(l)          # 先存直播源（不动页面）
+            if a:
+                on_point_ok(a)          # 再加载点播配置（成功后回主页）
+            elif not l:
+                self.status.configure(text="点播与直播地址均为空，未做改动")
+
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=20, pady=(10, 0))
+        FocusLabel(bar, text="直播历史", bg=PANEL_HI, fg=FG, font=tv_font(10),
+                   on_select=lambda: (win.destroy(), self._pick_live_hist())
+                   ).pack(side="left")
+        FocusLabel(bar, text="确定", bg=FOCUS_BG, fg=FOCUS_FG, font=tv_font(11, True),
+                   on_select=confirm).pack(side="right")
+        FocusLabel(bar, text="取消", bg=PANEL_HI, fg=FG, font=tv_font(10),
+                   on_select=win.destroy).pack(side="right", padx=(0, 8))
+
+        for ent in (ent_api, ent_live):
+            ent.bind("<Return>", confirm)
+        win.bind("<Escape>", lambda e: win.destroy())
+        (ent_live if focus_live else ent_api).focus_set()
 
     def _load_api(self, url):
         url = (url or "").strip()
@@ -276,30 +389,6 @@ class Page(tk.Frame):
             f"功能：点播(CMS/Spider/py) · 直播 · 搜索 · 历史收藏 · 推送 · 设置"))
 
     # ------------------------------------------------ 弹窗 ----
-    def _dialog(self, title, value, on_ok):
-        win = tk.Toplevel(self)
-        win.title(title)
-        win.configure(bg=BG)
-        win.transient(self.winfo_toplevel())
-        win.grab_set()
-        tk.Label(win, text=title, bg=BG, fg=FG, font=tv_font(14, True)
-                 ).pack(padx=20, pady=(14, 6), anchor="w")
-        ent = tk.Entry(win, bg=PANEL, fg=FG, width=64, font=("Consolas", 11),
-                       insertbackground=FG, highlightthickness=1,
-                       highlightbackground="#333")
-        ent.insert(0, value)
-        ent.pack(padx=20, pady=4)
-        ent.selection_range(0, "end")
-        ent.focus_set()
-
-        def confirm(_e=None):
-            win.destroy()
-            on_ok(ent.get())
-        ent.bind("<Return>", confirm)
-        FocusLabel(win, text="确定", font=tv_font(12, True), bg=FOCUS_BG,
-                   fg=FOCUS_FG, on_select=confirm).pack(pady=(8, 14))
-        win.bind("<Escape>", lambda e: win.destroy())
-
     def _list_dialog(self, title, items, on_pick):
         win = tk.Toplevel(self)
         win.title(title)

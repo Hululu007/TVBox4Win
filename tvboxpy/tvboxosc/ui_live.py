@@ -1,10 +1,80 @@
 """直播页 LivePlayActivity 复刻：txt/m3u 频道列表解析 + mpv 播放 + 分组/换台"""
+import os
 import threading
 import tkinter as tk
 
 from . import apiconfig, hawk, ui_thread
 from .player import MpvPlayer
 from .theme import BG, FG, FG_DIM, FocusLabel, tv_font, grid_key_nav, PANEL, ACCENT
+
+
+def read_live_source(url):
+    """读取直播源文本（对应原版 LIVE_API_URL 的加载）：支持 http(s) 与本地文件"""
+    u = str(url or "").strip()
+    if u.startswith(("http://", "https://")):
+        from .apiconfig import fetch_text
+        return fetch_text(u)
+    path = u[8:] if u.startswith("file:///") else u
+    path = path.replace("/", os.sep)
+    if not os.path.isabs(path):
+        from .paths import data_path
+        path = data_path(path)
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        return f.read()
+
+
+def parse_live_source(text, url=""):
+    """解析直播源 → (源名, [(group, name, [(url, src)...])])
+
+    兼容三种形态（与 ApiConfig.parseLiveJson / loadLiveApi 等价）：
+    1. 直接是 txt(#genre#)/m3u 频道列表
+    2. TVBox 配置 JSON（含 lives 数组）→ 递归加载第一个可用直播源
+    3. 单个直播源 JSON（含 name/url）
+    """
+    text = text or ""
+    name = ""
+    if url:
+        base = os.path.basename(str(url).split("?")[0].replace("\\", "/"))
+        name = os.path.splitext(base)[0]
+    s = text.lstrip("\ufeff \r\n\t")
+    if s.startswith("{"):
+        cfg = apiconfig.extract_json(s)
+        if not isinstance(cfg, dict):
+            cfg = None
+        if isinstance(cfg, dict):
+            lives = cfg.get("lives")
+            if isinstance(lives, list) and lives:
+                for l in lives:
+                    if not isinstance(l, dict):
+                        continue
+                    if str(l.get("type", "0") or "0") not in ("0", ""):
+                        continue
+                    u = str(l.get("url") or l.get("api") or "").strip()
+                    if not u or "127.0.0.1" in u or "localhost" in u:
+                        continue
+                    try:
+                        chs = _parse_live_text(read_live_source(u))
+                    except Exception:
+                        continue
+                    if chs:
+                        return l.get("name") or name, chs
+                return name, []
+            u = str(cfg.get("url") or cfg.get("api") or "").strip()
+            if u:
+                if u.startswith("---"):  # 原版 json 内嵌列表
+                    return cfg.get("name") or name, _parse_live_text(
+                        u.lstrip("-").strip())
+                try:
+                    chs = _parse_live_text(read_live_source(u))
+                except Exception:
+                    chs = []
+                if chs:
+                    return cfg.get("name") or name, chs
+                if u.startswith(("http://", "https://", "rtmp://", "rtp://", "udp://")):
+                    n = cfg.get("name") or name or "直播"
+                    return n, [[cfg.get("group") or "直播", n, [(u, "线路1")]]]
+                return name, []
+    return name, _parse_live_text(text)
 
 
 def _parse_live_text(text):
@@ -133,24 +203,33 @@ class Page(tk.Frame):
         return None, None
 
     def _load(self):
-        # 依次尝试配置里的直播源，直到成功解析出频道
+        # 优先使用设置里自定义的直播源（对应 HawkConfig.LIVE_API_URL），
+        # 未设置或解析失败则回落到接口配置里的 lives
         def run():
-            from .apiconfig import fetch_text
             name, chs = None, []
-            for l in apiconfig.api_config.lives:
-                url = str(l.get("url", ""))
-                if str(l.get("type", "0")) != "0" or not url:
-                    continue
-                if "127.0.0.1" in url or "localhost" in url:
-                    continue  # 原版内置代理，不可用
+            custom = str(hawk.get(hawk.LIVE_API_URL, "") or "").strip()
+            if custom:
                 try:
-                    text = fetch_text(url)
+                    name, chs = parse_live_source(read_live_source(custom), custom)
                 except Exception:
-                    continue
-                chs = _parse_live_text(text)
-                if chs:
-                    name = l.get("name", "直播")
-                    break
+                    name, chs = None, []
+                if not chs:
+                    name = None
+            if not chs:
+                for l in apiconfig.api_config.lives:
+                    url = str(l.get("url", ""))
+                    if str(l.get("type", "0")) != "0" or not url:
+                        continue
+                    if "127.0.0.1" in url or "localhost" in url:
+                        continue  # 原版内置代理，不可用
+                    try:
+                        text = apiconfig.fetch_text(url)
+                    except Exception:
+                        continue
+                    chs = _parse_live_text(text)
+                    if chs:
+                        name = l.get("name", "直播")
+                        break
             ui_thread.run(lambda: self._render(chs, name))
         threading.Thread(target=run, daemon=True).start()
 
