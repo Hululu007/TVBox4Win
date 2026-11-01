@@ -56,15 +56,17 @@ class Page(tk.Frame):
 
     COLS = 5  # 默认列数；实际由 _calc_card_layout 按窗口宽度自适应覆盖
 
-    def __init__(self, master, app, pre_key=None):
+    def __init__(self, master, app, pre_key=None, restore_state=None):
         super().__init__(master, bg=BG)
         self.app = app
         self._searching = False
         self._result_count = 0
         self._token = 0  # 搜索代次：切换关键词后旧结果作废
+        self._restore_state = dict(restore_state or {})
+        self._pending_filter = self._restore_state.get("filter", "all")
 
         back = FocusLabel(self, text="←", font=tv_font(14, True),
-                          on_select=app.go_home)
+                          on_select=self._back)
         back.place(x=16, y=10)
 
         # ── 顶栏：两行状态 + 关键词输入 ──
@@ -131,6 +133,28 @@ class Page(tk.Frame):
         self._rendered = set()     # 已渲染的 key|vid
 
         self.kw.focus_set()
+        keyword = str(self._restore_state.get("keyword", "") or "").strip()
+        if keyword:
+            self.kw.insert(0, keyword)
+            self.after(0, self.do_search)
+
+    def _back(self):
+        from .ui_grid import Page as GridPage
+        self.app.go_back(GridPage)
+
+    def capture_state(self):
+        try:
+            scroll = self._canvas.yview()[0]
+        except (AttributeError, tk.TclError):
+            scroll = 0.0
+        return (), {
+            "pre_key": None,
+            "restore_state": {
+                "keyword": self.kw.get().strip(),
+                "filter": self._shown_key,
+                "scroll": scroll,
+            },
+        }
 
     # ── 兼容旧调用：destroy 时停线程回调 ──
     def destroy(self):
@@ -302,6 +326,13 @@ class Page(tk.Frame):
                      font=tv_font(13)).grid(row=0, column=0, padx=20, pady=30)
             return
         self._refresh_visible(token, force=True)
+        if self._pending_filter not in ("", "all"):
+            self._select_filter(self._pending_filter)
+        self._pending_filter = "all"
+        scroll = self._restore_state.get("scroll", 0.0)
+        self._restore_state = {}
+        if scroll:
+            self.after(80, lambda: self._canvas.yview_moveto(scroll))
 
     # ── 显示逻辑：精确匹配优先；无精确且无其它已显示时展示全部匹配 ──
     def _visible_rows(self):

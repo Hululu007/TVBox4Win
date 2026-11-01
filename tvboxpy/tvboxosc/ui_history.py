@@ -21,7 +21,7 @@ class Page(tk.Frame):
         top = tk.Frame(self, bg=BG)
         top.pack(fill="x", pady=(16, 8))
         FocusLabel(top, text="←", font=tv_font(14, True),
-                   on_select=app.go_home).pack(side="left", padx=20)
+                   on_select=lambda: self._back()).pack(side="left", padx=20)
         tk.Label(top, text="观看历史", bg=BG, fg=FG,
                  font=tv_font(18, True)).pack(side="left")
         FocusLabel(top, text="🗑 管理", bg=PANEL, fg=FG, font=tv_font(12),
@@ -98,6 +98,10 @@ class Page(tk.Frame):
         from .ui_detail import Page as DetailPage
         self.app.switch(DetailPage, source_key=r["source_key"],
                         vod_id=r["vod_id"], vod_name=r["vod_name"])
+
+    def _back(self):
+        from .ui_grid import Page as GridPage
+        self.app.go_back(GridPage)
 
     def _delete(self, r):
         store.delete_record(r["vod_id"], r["source_key"])

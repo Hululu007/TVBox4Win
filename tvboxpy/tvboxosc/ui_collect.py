@@ -19,7 +19,7 @@ class Page(tk.Frame):
         top = tk.Frame(self, bg=BG)
         top.pack(fill="x", pady=(16, 8))
         FocusLabel(top, text="←", font=tv_font(14, True),
-                   on_select=app.go_home).pack(side="left", padx=20)
+                   on_select=lambda: self._back()).pack(side="left", padx=20)
         tk.Label(top, text="我的收藏", bg=BG, fg=FG,
                  font=tv_font(18, True)).pack(side="left")
 
@@ -50,6 +50,10 @@ class Page(tk.Frame):
         from .ui_detail import Page as DetailPage
         self.app.switch(DetailPage, source_key=r["source_key"],
                         vod_id=r["vod_id"], vod_name=r["vod_name"])
+
+    def _back(self):
+        from .ui_grid import Page as GridPage
+        self.app.go_back(GridPage)
 
     def _remove(self, r):
         store.remove_collect(r["source_key"], r["vod_id"])

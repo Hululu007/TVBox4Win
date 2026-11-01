@@ -25,10 +25,13 @@ _WEEK = "一二三四五六日"
 class Page(tk.Frame):
     """对应 ui/fragment/GridFragment.java"""
 
-    def __init__(self, master, app, source_key=None):
+    def __init__(self, master, app, source_key=None, restore_state=None):
         super().__init__(master, bg=BG)
         self.app = app
         self.source_key = source_key or hawk.get(hawk.HOME_SOURCE)
+        self._restore_state = dict(restore_state or {})
+        self._restore_pending = bool(self._restore_state)
+        self._pending_scroll = self._restore_state.get("scroll", 0.0)
         self.bean = apiconfig.api_config.get(self.source_key) if self.source_key else None
         if self.bean is None and apiconfig.api_config.source_bean_list:
             # 记录里的站源在本次配置中已不存在（配置换了/源被删）→ 回落第一个可用站点，
@@ -109,6 +112,7 @@ class Page(tk.Frame):
 
         self._seq = 0
         self._prio = 0  # 海报下载优先级：当前内容区=0，推荐位=2
+        self._request_seq = 0
         self._load_classes()
         self._reload_grid()  # 默认「主页」tab：加载豆瓣热播
         self.after(8000, self._slow_hint)   # 爬虫运行时启动慢时给出可见反馈
@@ -198,7 +202,8 @@ class Page(tk.Frame):
         self._switching = True
         hawk.put(hawk.HOME_SOURCE, bean.key)
         try:
-            self.app.switch(Page, source_key=bean.key)
+            # 切换源替换当前网格，不要把同页的旧源再压入返回栈。
+            self.app.switch(Page, source_key=bean.key, push=False)
         finally:
             self._switching = False
 
@@ -275,6 +280,41 @@ class Page(tk.Frame):
         if tab_btns:
             tab_btns[0].focus_set()
         # 默认停在「主页」tab（对应原版合并页：进源即显示豆瓣热播）
+        self._apply_restore_state()
+
+    def _apply_restore_state(self):
+        if not self._restore_pending:
+            return
+        self._restore_pending = False
+        try:
+            class_id = self._restore_state.get("class_id")
+            if class_id is not None and class_id in [c[0] for c in self.classes]:
+                self.cur_class = class_id
+                self.page_index = max(1, int(self._restore_state.get("page", 1)))
+                filters = self._restore_state.get("filter_sel")
+                self.filter_sel = dict(filters) if isinstance(filters, dict) else {}
+                self._render_tabs_hl()
+                self._reload_grid()
+            else:
+                self.cur_class = None
+        except (TypeError, ValueError):
+            self.cur_class = None
+        self._restore_state = {}
+
+    def capture_state(self):
+        try:
+            scroll = self.canvas.yview()[0]
+        except tk.TclError:
+            scroll = 0.0
+        return (), {
+            "source_key": self.source_key,
+            "restore_state": {
+                "class_id": self.cur_class,
+                "page": self.page_index,
+                "filter_sel": dict(self.filter_sel),
+                "scroll": scroll,
+            },
+        }
 
     def select_class(self, class_id, auto=False):
         self._auto = auto
@@ -446,22 +486,33 @@ class Page(tk.Frame):
             w.destroy()
         tk.Label(self.inner, text="加载中...", bg=BG, fg=FG_DIM,
                  font=tv_font(12)).grid(row=0, column=0, padx=10, pady=20)
+        self._request_seq += 1
+        request_seq = self._request_seq
+        target_class = self.cur_class
+        target_page = self.page_index
 
         def run():
             try:
                 result = data_api.get_vods(self.bean, self.cur_class,
-                                           self.page_index, self.filter_sel or None)
+                                           target_page, self.filter_sel or None)
                 if not result[0]:  # 偶发网络失败，重试一次
                     result = data_api.get_vods(self.bean, self.cur_class,
-                                               self.page_index, self.filter_sel or None)
+                                               target_page, self.filter_sel or None)
             except Exception as ex:
                 from .paths import log_error
                 log_error("get_vods 失败 bean=%s class=%s" %
                           (self.bean.name, self.cur_class), ex)
-                result = ([], self.page_index, 1)
-            ui_thread.run(lambda: self._render_grid(*result))
+                result = ([], target_page, 1)
+            ui_thread.run(lambda: self._render_grid_if_current(
+                request_seq, target_class, *result))
         import threading
         threading.Thread(target=run, daemon=True).start()
+
+    def _render_grid_if_current(self, request_seq, target_class,
+                                vods, page, pagecount):
+        if request_seq != self._request_seq or target_class != self.cur_class:
+            return
+        self._render_grid(vods, page, pagecount)
 
     def _render_grid(self, vods, page, pagecount):
         if not self.winfo_exists():
@@ -512,6 +563,14 @@ class Page(tk.Frame):
                  bg=BG, fg=FG_DIM, font=tv_font(11)).pack(side="left", padx=8)
         if btns:
             btns[0].focus_set()
+        self._restore_scroll()
+
+    def _restore_scroll(self):
+        if not self._pending_scroll:
+            return
+        scroll = self._pending_scroll
+        self._pending_scroll = 0.0
+        self.after(80, lambda: self.canvas.yview_moveto(scroll))
 
     # ---------- 自适应布局 ----------
     def _grid_layout(self):
@@ -755,6 +814,8 @@ class Page(tk.Frame):
         """首页推荐位渲染（kind：douban 豆瓣热播 / site 站点推荐 / history 观看历史）"""
         if not self.winfo_exists():
             return
+        if self.cur_class is not None:
+            return  # 已切到分类，丢弃迟到的首页推荐结果
         self._prio = 2  # 推荐位让路给网格/详情海报
         self._rec_args = (header, items, kind)  # 窗口变宽后 _relayout 重排用
         for w in self.inner.winfo_children():
@@ -811,6 +872,7 @@ class Page(tk.Frame):
             btns[0].focus_set()
         from .theme import grid_key_nav
         grid_key_nav(btns, cols)
+        self._restore_scroll()
 
     # ---------- 推荐位交互 ----------
     def _open_rec_item(self, kind, name, vod_id, src_key):

@@ -37,7 +37,7 @@ class Page(tk.Frame):
         bar = tk.Frame(self, bg=BG)
         bar.pack(fill="x")
         FocusLabel(bar, text="← 返回", font=tv_font(12, True),
-                   on_select=app.go_home).pack(side="left", padx=12, pady=6)
+                   on_select=lambda: self._back()).pack(side="left", padx=12, pady=6)
         tk.Label(bar, text="设置", bg=BG, fg=FG, font=tv_font(16, True)
                  ).pack(side="left", padx=10)
 
@@ -69,6 +69,10 @@ class Page(tk.Frame):
         # 方向键导航（2 列）
         from .theme import grid_key_nav
         grid_key_nav(self._cards, 2, up_down_rows=1)
+
+    def _back(self):
+        from .ui_grid import Page as GridPage
+        self.app.go_back(GridPage)
 
     # ------------------------------------------------ 卡片构建 ----
     def _add_card(self, grid, name, full=False, cb=None):

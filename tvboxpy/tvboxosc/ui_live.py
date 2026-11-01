@@ -432,7 +432,6 @@ class Page(tk.Frame):
             cnt = sum(1 for c in self.channels if c[0] == g)
             b = FocusLabel(self.group_inner, text=f"{g}　{cnt}", bg="#0B1020", fg=FG,
                            font=tv_font(11), padx=12, pady=7, anchor="w")
-            b.configure(on_select=None)
             b.on_select = lambda gg=g: self._pick_group(gg)
             b.pack(fill="x", padx=4, pady=1)
             b.bind("<FocusIn>", lambda e, gg=g: self._group_focused(gg), add="+")
@@ -466,7 +465,6 @@ class Page(tk.Frame):
                            text=f"{'▶' if self._is_cur(c) else '　'} {num:>3}  {c[1]}",
                            bg="#141B33", fg=FG, font=tv_font(11),
                            padx=10, pady=6, anchor="w")
-            b.configure(on_select=None)
             b.on_select = lambda cc=c: self._play(cc)
             b.pack(fill="x", padx=4, pady=1)
             b.bind("<FocusIn>", lambda e, cc=c: self._channel_focused(cc), add="+")
@@ -849,7 +847,8 @@ class Page(tk.Frame):
             self.status.configure(text=f"{self.cur_ch[0]} · {self.cur_ch[1]}")
 
     def _stop_and_back(self):
-        self.app.go_home()
+        from .ui_grid import Page as GridPage
+        self.app.go_back(GridPage)
 
     def _stop_player(self):
         if self.player:

@@ -251,7 +251,8 @@ class Page(tk.Frame):
         if self.player:
             self.player.terminate()
             self.player = None
-        self.app.go_home()
+        from .ui_grid import Page as GridPage
+        self.app.go_back(GridPage)
 
     def destroy(self):
         if getattr(self, "_cb", None) is not None and _UI_CB[0] is self._cb:

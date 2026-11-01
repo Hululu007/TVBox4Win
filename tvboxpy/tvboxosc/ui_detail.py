@@ -10,7 +10,8 @@ from .theme import BG, FG, FG_DIM, ACCENT, FocusLabel, tv_font, grid_key_nav, PA
 class Page(tk.Frame):
     """对应 ui/activity/DetailActivity.java"""
 
-    def __init__(self, master, app, source_key, vod_id, vod_name=""):
+    def __init__(self, master, app, source_key, vod_id, vod_name="",
+                 restore_state=None):
         super().__init__(master, bg=BG)
         self.app = app
         self.source_key = source_key
@@ -19,6 +20,8 @@ class Page(tk.Frame):
         self.bean = apiconfig.api_config.get(source_key)
         self.info = None
         self.cur_flag = 0
+        self._selected_ep = 0
+        self._restore_state = dict(restore_state or {})
 
         back = FocusLabel(self, text="←", font=tv_font(14, True),
                           on_select=self._back)
@@ -30,7 +33,25 @@ class Page(tk.Frame):
 
     def _back(self):
         from .ui_grid import Page as GridPage
-        self.app.switch(GridPage, source_key=self.source_key)
+        self.app.go_back(
+            GridPage, fallback_kwargs={"source_key": self.source_key})
+
+    def capture_state(self):
+        """保存线路和选集，播放页返回时不需要重新从头选择。"""
+        flag = ""
+        try:
+            flag = self.info["series_flags"][self.cur_flag][0]
+        except (KeyError, IndexError, TypeError):
+            pass
+        return (), {
+            "source_key": self.source_key,
+            "vod_id": self.vod_id,
+            "vod_name": self.vod_name,
+            "restore_state": {
+                "flag": flag,
+                "ep_index": self._selected_ep,
+            },
+        }
 
     def _load(self):
         tk.Label(self.body, text="加载中...", bg=BG, fg=FG_DIM,
@@ -63,6 +84,7 @@ class Page(tk.Frame):
                       ("year", ""), ("area", ""), ("lang", ""), ("cls", ""),
                       ("series_flags", []), ("series_urls", [])):
             info.setdefault(k, dv)
+        self._normalize_series(info)
         self.info = info
         top = tk.Frame(self.body, bg=BG)
         top.pack(fill="x")
@@ -108,7 +130,7 @@ class Page(tk.Frame):
         btns.pack(anchor="w", pady=12)
         # 历史恢复（对应 Java onChanged 读 VodInfo 恢复 playFlag/playIndex）
         self._resume = self._resume_from_history()
-        if self._resume:
+        if info["series_flags"] and self._resume:
             f_idx, ep_idx = self._resume
             ep_name = self.info["series_flags"][f_idx][1][ep_idx]
             ep_url = self.info["series_urls"][f_idx][ep_idx]
@@ -116,10 +138,8 @@ class Page(tk.Frame):
                        font=tv_font(14, True),
                        on_select=lambda: self._play(ep_idx, ep_url)
                        ).pack(side="left", padx=(0, 10))
-        else:
-            first_ep = ""
-            if info["series_urls"] and info["series_urls"][0]:
-                first_ep = info["series_urls"][0][0]
+        elif info["series_flags"]:
+            first_ep = info["series_urls"][0][0]
             FocusLabel(btns, text="▶ 播放", bg=ACCENT, fg="#FFFFFF",
                        font=tv_font(14, True),
                        on_select=lambda: self._play(0, first_ep)).pack(side="left", padx=(0, 10))
@@ -147,8 +167,12 @@ class Page(tk.Frame):
                 FocusLabel(flag_bar, text=flag or f"线路{i+1}", bg=PANEL, fg=FG,
                            font=tv_font(12),
                            on_select=lambda idx=i: self._select_flag(idx)).pack(side="left", padx=4)
-            # 选集区定位到上次看的线路，并标记 ▸
-            if self._resume:
+            # 播放页返回时先恢复当前线路；否则使用观看历史的线路。
+            restore_idx = self._restore_flag_index()
+            if restore_idx is not None:
+                ep_idx = self._restore_state.get("ep_index", 0)
+                self._select_flag(restore_idx, resume_ep=ep_idx)
+            elif self._resume:
                 self._select_flag(self._resume[0], resume_ep=self._resume[1])
             else:
                 self._select_flag(0)
@@ -179,6 +203,44 @@ class Page(tk.Frame):
                              height=photo.height())
         imgcache.load(f"detail{self.vod_id}", url, on_ready, headers, priority=0)
 
+    @staticmethod
+    def _normalize_series(info):
+        """过滤空线路，并补齐集名，保证按钮、线路和 URL 始终一一对应。"""
+        flags = info.get("series_flags") or []
+        urls = info.get("series_urls") or []
+        clean_flags = []
+        clean_urls = []
+        for i, pair in enumerate(zip(flags, urls)):
+            try:
+                flag, names = pair[0]
+                line_urls = pair[1]
+                names = list(names or [])
+                line_urls = list(line_urls or [])
+            except (TypeError, ValueError):
+                continue
+            episodes = []
+            for ep_index, url in enumerate(line_urls):
+                if url is None or not str(url).strip():
+                    continue
+                name = names[ep_index] if ep_index < len(names) else ""
+                name = str(name or f"第{len(episodes) + 1}集")
+                episodes.append((name, str(url)))
+            if not episodes:
+                continue
+            clean_flags.append((str(flag or f"线路{i + 1}"),
+                                [name for name, _ in episodes]))
+            clean_urls.append([url for _, url in episodes])
+        info["series_flags"] = clean_flags
+        info["series_urls"] = clean_urls
+
+    def _restore_flag_index(self):
+        try:
+            flag = self._restore_state.get("flag", "")
+            flags = [f for f, _ in self.info["series_flags"]]
+            return flags.index(flag)
+        except (KeyError, ValueError, TypeError):
+            return None
+
     def _resume_from_history(self):
         """从历史 dataJson 恢复 (flag_idx, ep_idx)，线路/集名不匹配则返回 None"""
         rec = store.get_record(self.source_key, self.vod_id)
@@ -190,7 +252,10 @@ class Page(tk.Frame):
             f_idx = flags.index(data.get("flag", ""))
         except ValueError:
             return None
-        ep_idx = int(data.get("ep_index", 0) or 0)
+        try:
+            ep_idx = int(data.get("ep_index", 0) or 0)
+        except (TypeError, ValueError):
+            ep_idx = 0
         eps = self.info["series_flags"][f_idx][1]
         if ep_idx >= len(eps):
             ep_idx = 0
@@ -201,6 +266,14 @@ class Page(tk.Frame):
     EP_CHUNK = 100  # 选集分批渲染：千集长剧一次性建全量按钮会卡死 UI（原版用 RecyclerView 懒加载）
 
     def _select_flag(self, idx, resume_ep=None):
+        if not 0 <= idx < len(self.info["series_flags"]):
+            return
+        try:
+            resume_ep = int(resume_ep) if resume_ep is not None else None
+        except (TypeError, ValueError):
+            resume_ep = 0
+        if resume_ep is not None:
+            resume_ep = max(0, resume_ep)
         self.cur_flag = idx
         self._ep_names = self.info["series_flags"][idx][1]
         self._ep_urls = self.info["series_urls"][idx]
@@ -218,6 +291,9 @@ class Page(tk.Frame):
             count = (resume_ep // self.EP_CHUNK + 1) * self.EP_CHUNK
         if resume_ep is not None and resume_ep < len(self._ep_names):
             self._resume_ep = resume_ep
+            self._selected_ep = resume_ep
+        else:
+            self._selected_ep = 0
         self._render_eps(count)
 
     def _render_eps(self, count):
@@ -251,10 +327,24 @@ class Page(tk.Frame):
             btns[0].focus_set()
 
     def _play(self, ep_index, play_url):
+        try:
+            names = self.info["series_flags"][self.cur_flag][1]
+            urls = self.info["series_urls"][self.cur_flag]
+            flag = self.info["series_flags"][self.cur_flag][0]
+            if not 0 <= ep_index < len(urls):
+                raise IndexError(ep_index)
+            play_url = play_url or urls[ep_index]
+            if not str(play_url or "").strip():
+                raise ValueError("empty play url")
+        except (KeyError, IndexError, TypeError, ValueError):
+            try:
+                self.playurl_lbl.configure(text="该线路没有可播放地址")
+            except (AttributeError, tk.TclError):
+                pass
+            return
+        self._selected_ep = ep_index
         from .ui_play import Page as PlayPage
-        names = self.info["series_flags"][self.cur_flag][1]
         ep_name = names[ep_index] if ep_index < len(names) else ""
-        flag = self.info["series_flags"][self.cur_flag][0]
         self.app.switch(PlayPage, source_key=self.source_key, vod_id=self.vod_id,
                         vod_name=self.info["name"], play_flag=flag,
                         play_ep=ep_name, play_url=play_url,

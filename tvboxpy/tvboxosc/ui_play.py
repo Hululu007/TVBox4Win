@@ -536,13 +536,20 @@ class Page(tk.Frame):
         # 3) 立即切回详情页（构造失败则退回点播页，绝不空窗）
         try:
             from .ui_detail import Page as DetailPage
-            self.app.switch(DetailPage, source_key=source_key,
-                            vod_id=vod_id, vod_name=vod_name)
+            self.app.go_back(
+                DetailPage,
+                fallback_kwargs={
+                    "source_key": source_key,
+                    "vod_id": vod_id,
+                    "vod_name": vod_name,
+                },
+            )
         except Exception as e:
             log_error("[play] 返回详情页失败", e)
             try:
                 from .ui_grid import Page as GridPage
-                self.app.switch(GridPage, source_key=source_key)
+                self.app.go_back(
+                    GridPage, fallback_kwargs={"source_key": source_key})
             except Exception as e:
                 log_error("[play] 退回点播页失败", e)
 
