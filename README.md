@@ -2,7 +2,7 @@
 
 **TVBox4Win** = TVBox **for** Windows：把安卓 TV 上流行的影视聚合播放器 TVBox 完整搬到 Windows 桌面。
 
-当前版本：**v0.9.2**（版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
+当前版本：**v0.9.3**（版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
 
 把安卓 TV 上流行的影视聚合播放器 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 复刻到 Windows 桌面：
 **Python 3 + tkinter + libmpv** 实现，单文件 EXE 即可运行，UI 与交互按原版逐页对齐。
@@ -11,7 +11,7 @@
 
 ## 📥 免安装下载（推荐）
 
-不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases/latest) 下载 `TVBox4Win-v0.9.2-win64.zip`：
+不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases/latest) 下载 `TVBox4Win-v0.9.3-win64.zip`：
 
 1. 解压到任意可写目录
 2. 双击 `tvboxpy.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
