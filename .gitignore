@@ -51,3 +51,10 @@ desktop.ini
 # ---------- 自检产物 ----------
 check_result.txt
 smoke_result.txt
+
+# ---------- Android（Kivy / python-for-android）----------
+android/.buildozer/
+android/vendor/
+android/bin/
+android/build/
+android/*.png
