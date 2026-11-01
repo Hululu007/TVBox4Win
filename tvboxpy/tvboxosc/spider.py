@@ -164,6 +164,12 @@ class Spider:
             args.append(list(vip_flags))
         return json.loads(self._call("play", args))
 
+    def live_content(self, url=""):
+        """直播频道列表（对应 JsSpider.liveContent → JS 的 live(url)）"""
+        res = self._call("live", [str(url or "")])
+        # bridge 原样返回字符串；个别站点返回对象时序列化成 JSON 交给上层解析
+        return res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+
 
 def _find_node():
     """找 node：候选路径由平台层提供（GUI 启动的 .app 只有最小 PATH）"""

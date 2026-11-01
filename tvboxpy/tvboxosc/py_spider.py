@@ -637,6 +637,14 @@ class PySpider:
                                      json.dumps(vip_flags or [], ensure_ascii=False))) \
             or {"parse": 1, "url": str(ep_id)}
 
+    def live_content(self, url=""):
+        """直播频道列表（对应原版 Spider.liveContent(url)）"""
+        self._ensure()
+        fn = getattr(self._impl, "liveContent", None)
+        if not callable(fn):
+            raise RuntimeError("py 爬虫未实现 liveContent")
+        return fn(str(url or ""))
+
     def local_proxy(self, param):
         """调用爬虫的 localProxy（原版通过 /proxy?do=py 回传）"""
         self._ensure()

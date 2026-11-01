@@ -1,4 +1,5 @@
 """直播页 LivePlayActivity 复刻：txt/m3u 频道列表解析 + mpv 播放 + 分组/换台 + EPG"""
+import json
 import os
 import re
 import threading
@@ -40,6 +41,90 @@ def read_live_source(url):
         return f.read()
 
 
+_LIVE_PREFIXES = ("http://", "https://", "rtmp://", "rtp://", "udp://")
+
+
+def _live_entry_type(l):
+    """lives[] 条目的类型（对应 ApiConfig.loadLiveApi 的 type 默认值判断）
+
+    原版默认：api 含 .py/.js → "3"，其余 → "0"；这里把 csp_ jar 类爬虫
+    也归为 "3"（桌面端支持此类直播源）。"""
+    t = l.get("type")
+    t = "" if t is None else str(t).strip()
+    if t:
+        return t
+    api = str(l.get("api") or "")
+    if api.startswith("csp_") or ".py" in api or ".js" in api:
+        return "3"
+    return "0"
+
+
+def _channels_from_json(arr):
+    """直播 spider / JSON 数组 → [(分组, 频道名, [(url, 源名, header)...])]
+
+    形如 [{"group":"央视","channels":[{"name":"CCTV1","urls":[...],"header":{...}}]}]，
+    对应原版 TxtSubscribe.parseToJsonArray 的 JSON 分支。"""
+    out = []
+    for g in arr or []:
+        if not isinstance(g, dict):
+            continue
+        gname = str(g.get("group") or g.get("name") or "直播").strip() or "直播"
+        for c in (g.get("channels") or g.get("channel") or []):
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("name") or "未命名").strip()
+            urls = c.get("urls")
+            if not isinstance(urls, list):
+                urls = [c.get("url")] if c.get("url") else []
+            hdr = c.get("header") if isinstance(c.get("header"), dict) else None
+            srcs = []
+            for u in urls:
+                u = str(u or "").strip()
+                if u.startswith(_LIVE_PREFIXES):
+                    srcs.append((u, f"线路{len(srcs) + 1}", hdr))
+            if srcs:
+                out.append((gname, name, srcs))
+    return out
+
+
+def _channels_from_live_result(out):
+    """liveContent 返回值（JSON 字符串 / 数组 / dict / txt / m3u）→ 频道列表"""
+    if out is None:
+        return []
+    if isinstance(out, str):
+        epg_addr = extract_epg_url(out)  # 爬虫返回 m3u 且带头信息时同样取 EPG
+        if epg_addr:
+            hawk.put(hawk.EPG_URL, epg_addr)
+        return _parse_live_text(out)
+    if isinstance(out, dict):
+        for key in ("list", "data", "channels"):
+            if isinstance(out.get(key), list):
+                out = out[key] if key != "channels" else [out]
+                break
+        else:
+            return []
+    if isinstance(out, list):
+        return _channels_from_json(out)
+    return []
+
+
+def _load_spider_live(l, idx=0):
+    """type=3 直播源：调爬虫 liveContent(url) 拿频道（对应原版 loadProxyLives）"""
+    api = str(l.get("api") or l.get("url") or "").strip()
+    if not api:
+        raise RuntimeError("type=3 直播源缺少 api")
+    epg_addr = str(l.get("epg") or "").strip()
+    if epg_addr:
+        hawk.put(hawk.EPG_URL, epg_addr)
+    from types import SimpleNamespace
+    from .spider import get_spider
+    bean = SimpleNamespace(key=f"live_{idx}", api=api,
+                           jar=str(l.get("jar") or "").strip() or None,
+                           ext=l.get("ext"))
+    out = get_spider(bean).live_content(str(l.get("url") or api))
+    return str(l.get("name") or ""), _channels_from_live_result(out)
+
+
 def parse_live_source(text, url=""):
     """解析直播源 → (源名, [(group, name, [(url, src)...])])
 
@@ -65,10 +150,19 @@ def parse_live_source(text, url=""):
         if isinstance(cfg, dict):
             lives = cfg.get("lives")
             if isinstance(lives, list) and lives:
-                for l in lives:
+                for idx, l in enumerate(lives):
                     if not isinstance(l, dict):
                         continue
-                    if str(l.get("type", "0") or "0") not in ("0", ""):
+                    ltype = _live_entry_type(l)
+                    if ltype not in ("0", "3"):
+                        continue
+                    if ltype == "3":  # 爬虫直播源（对应 loadProxyLives 的 .py/.js/jar 分支）
+                        try:
+                            sname, chs = _load_spider_live(l, idx)
+                        except Exception:
+                            continue
+                        if chs:
+                            return sname or l.get("name") or name, chs
                         continue
                     u = str(l.get("url") or l.get("api") or "").strip()
                     if not u or "127.0.0.1" in u or "localhost" in u:
@@ -107,6 +201,14 @@ def _parse_live_text(text):
     channels = []
     if not text:
         return channels
+    s = text.lstrip("﻿ \r\n\t")
+    if s.startswith("["):  # 爬虫/JSON 直播列表：TxtSubscribe.parseToJsonArray 的 JSON 分支
+        try:
+            arr = json.loads(s)
+        except ValueError:
+            arr = None
+        if isinstance(arr, list):
+            return _channels_from_json(arr)
     lines = text.splitlines()
     if any(l.startswith("#EXTINF") for l in lines):  # m3u
         import re
@@ -362,9 +464,21 @@ class Page(tk.Frame):
                 if not chs:
                     name = None
             if not chs:
-                for l in apiconfig.api_config.lives:
+                for idx, l in enumerate(apiconfig.api_config.lives):
+                    ltype = _live_entry_type(l)
                     url = str(l.get("url", ""))
-                    if str(l.get("type", "0")) != "0" or not url:
+                    if not url and ltype != "3":
+                        continue
+                    if ltype == "3":
+                        try:
+                            sname, chs = _load_spider_live(l, idx)
+                        except Exception:
+                            continue
+                        if chs:
+                            name = sname or l.get("name", "直播")
+                            break
+                        continue
+                    if ltype != "0":
                         continue
                     if "127.0.0.1" in url or "localhost" in url:
                         continue  # 原版内置代理，不可用
@@ -507,14 +621,16 @@ class Page(tk.Frame):
         self.cur_ch = ch
         self.cur_group = g
         self.cur_src = src_idx % len(srcs)
-        u, src_name = srcs[self.cur_src]
+        item = srcs[self.cur_src]
+        u, src_name = item[0], item[1]
+        hdr = item[2] if len(item) > 2 else None  # 爬虫直播源可带每频道 header
         try:
             self.update_idletasks()
             if not self.player:
                 self.player = MpvPlayer(
                     self.video, insets=(self.TOP_H, 0, self.BAR_H, 0))
                 self._raise_chrome()   # mpv 视频窗口会盖住后 place 的面板，必须重置 z 序
-            self.player.play(u)
+            self.player.play(u, hdr)
         except Exception as e:
             self.status.configure(text=f"播放失败：{e}")
             return

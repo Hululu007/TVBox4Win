@@ -430,6 +430,11 @@ class _SiteProxy:
         return self.js._site_call(self.cls, "playerContent", self.ext,
                                   [flag or "", str(id), vips])
 
+    def live_content(self, url=""):
+        """直播频道列表（对应 Spider.liveContent(url)，返回 JSON 数组或 txt/m3u）"""
+        return self.js._site_call(self.cls, "liveContent", self.ext,
+                                  [str(url or "")])
+
 
 def shutdown():
     with _lock:
