@@ -131,6 +131,18 @@ class Page(tk.Frame):
     def _short(url, n=44):
         return url if len(url) <= n else url[:n] + "…"
 
+    def _alive(self):
+        """页面是否还活着（异步回调回来时用户可能已经切走，控件已销毁）"""
+        try:
+            return bool(self.winfo_exists()) and bool(self.status.winfo_exists())
+        except Exception:
+            return False
+
+    def _set_status(self, text):
+        """带存活检查的状态栏写入，避免 TclError: invalid command name"""
+        if self._alive():
+            self.status.configure(text=text)
+
     @staticmethod
     def _home_source_name():
         key = hawk.get(hawk.HOME_SOURCE)
@@ -165,14 +177,14 @@ class Page(tk.Frame):
         if not url:
             hawk.delete(hawk.LIVE_API_URL)
             self._refresh_values()
-            self.status.configure(text="直播地址已清空：直播页将使用接口配置里的直播源")
+            self._set_status("直播地址已清空：直播页将使用接口配置里的直播源")
             return
         hist = [u for u in (hawk.get(hawk.LIVE_API_HISTORY, []) or []) if u != url]
         hist.insert(0, url)
         hawk.put(hawk.LIVE_API_HISTORY, hist[:10])
         hawk.put(hawk.LIVE_API_URL, url)
         self._refresh_values()
-        self.status.configure(text=f"直播地址已保存：{url}（正在校验…）")
+        self._set_status(f"直播地址已保存：{url}（正在校验…）")
 
         # 后台校验能不能解析出频道（不阻塞 UI）
         def check():
@@ -181,19 +193,19 @@ class Page(tk.Frame):
                 name, chs = parse_live_source(read_live_source(url), url)
             except Exception as e:
                 msg = f"直播地址已保存，但读取失败：{e}"
-                ui_thread.run(lambda: self.status.configure(text=msg))
+                ui_thread.run(lambda: self._set_status(msg))
                 return
             if chs:
                 msg = f"直播地址已保存：{name or '直播源'} · {len(chs)} 个频道"
             else:
                 msg = "直播地址已保存，但未解析到频道（可检查地址或格式）"
-            ui_thread.run(lambda: self.status.configure(text=msg))
+            ui_thread.run(lambda: self._set_status(msg))
         threading.Thread(target=check, daemon=True).start()
 
     def _pick_live_hist(self):
         urls = hawk.get(hawk.LIVE_API_HISTORY, []) or []
         if not urls:
-            self.status.configure(text="暂无直播历史")
+            self._set_status("暂无直播历史")
             return
         self._list_dialog("历史直播", urls, self._save_live)
 
@@ -245,7 +257,7 @@ class Page(tk.Frame):
             if a:
                 on_point_ok(a)          # 再加载点播配置（成功后回主页）
             elif not l:
-                self.status.configure(text="点播与直播地址均为空，未做改动")
+                self._set_status("点播与直播地址均为空，未做改动")
 
         bar = tk.Frame(win, bg=BG)
         bar.pack(fill="x", padx=20, pady=(10, 0))
@@ -265,9 +277,9 @@ class Page(tk.Frame):
     def _load_api(self, url):
         url = (url or "").strip()
         if not url:
-            self.status.configure(text="请输入接口地址")
+            self._set_status("请输入接口地址")
             return
-        self.status.configure(text=f"正在加载 {url} ...")
+        self._set_status(f"正在加载 {url} ...")
 
         def ok():
             def apply():
@@ -276,16 +288,21 @@ class Page(tk.Frame):
                 hawk.delete(hawk.HOME_SOURCE)
                 first = api_config.source_key_list[0] if api_config.source_key_list else ""
                 hawk.put(hawk.HOME_SOURCE, first)
-                self.status.configure(text="配置加载成功，正在返回主页…")
-                self._refresh_values()
-                self.app.go_home()
+                if self._alive():
+                    self._set_status("配置加载成功，正在返回主页…")
+                    self._refresh_values()
+                    self.app.go_home()
             ui_thread.run(apply)
-        api_config.load(url, ok_cb=ok)
+
+        def err(msg):
+            # 失败必须让用户看到，否则弹窗一关就像「点了没反应」
+            ui_thread.run(lambda: self._set_status(f"配置加载失败：{msg}"))
+        api_config.load(url, ok_cb=ok, err_cb=err)
 
     def _pick_hist(self):
         urls = hawk.get(hawk.API_HISTORY, []) or []
         if not urls:
-            self.status.configure(text="暂无配置历史")
+            self._set_status("暂无配置历史")
             return
         self._list_dialog("配置历史", urls, self._load_api)
 
@@ -304,7 +321,7 @@ class Page(tk.Frame):
     def _apply_home_rec(self, value):
         hawk.put(hawk.HOME_REC, value)
         self._refresh_values()
-        self.status.configure(text=f"首页推荐已切换为「{HOME_REC_NAMES[value]}」，"
+        self._set_status(f"首页推荐已切换为「{HOME_REC_NAMES[value]}」，"
                                    f"返回主页即可看到效果")
         # 立刻回主页让用户看到效果（对应原版 Hawk 改动后首页重刷）
         self.after(260, self.app.go_home)
@@ -319,7 +336,7 @@ class Page(tk.Frame):
     def _apply_codec(self, value):
         hawk.put(hawk.IJK_CODEC, CODEC_NAMES[value])
         self._refresh_values()
-        self.status.configure(text=f"解码方式已切换为「{CODEC_NAMES[value]}」，"
+        self._set_status(f"解码方式已切换为「{CODEC_NAMES[value]}」，"
                                    f"下次播放生效")
 
     def _pick_scale(self):
@@ -337,7 +354,7 @@ class Page(tk.Frame):
     def _apply_scale(self, value):
         hawk.put(hawk.PLAY_SCALE, value)
         self._refresh_values()
-        self.status.configure(text=f"画面缩放已切换为「{SCALE_NAMES[value]}」，"
+        self._set_status(f"画面缩放已切换为「{SCALE_NAMES[value]}」，"
                                    f"下次播放生效")
 
     def _pick_his_num(self):
@@ -355,14 +372,14 @@ class Page(tk.Frame):
     def _apply_his_num(self, value):
         hawk.put(hawk.HISTORY_NUM, value)
         self._refresh_values()
-        self.status.configure(text=f"历史记录最多保留 {HIS_NUM_ARRAY[value]} 条，"
+        self._set_status(f"历史记录最多保留 {HIS_NUM_ARRAY[value]} 条，"
                                    f"超出部分自动清理")
 
     def _toggle_home_page(self):
         cur = self._home_page()
         hawk.put("home_page", "vod" if cur == "live" else "live")
         self._refresh_values()
-        self.status.configure(text="下次进入将打开 " +
+        self._set_status("下次进入将打开 " +
                               ("直播" if cur != "live" else "点播"))
 
     def _clear_cache(self):
@@ -378,7 +395,7 @@ class Page(tk.Frame):
                 shutil.rmtree(cache_dir)
         except Exception:
             pass
-        self.status.configure(text="缓存已清空（配置/分类缓存 + 爬虫缓存）")
+        self._set_status("缓存已清空（配置/分类缓存 + 爬虫缓存）")
 
     def _show_about(self):
         n_sites = len(api_config.source_bean_list)
@@ -396,22 +413,37 @@ class Page(tk.Frame):
         win.transient(self.winfo_toplevel())
         win.grab_set()
         tk.Label(win, text=title, bg=BG, fg=FG, font=tv_font(14, True)
-                 ).pack(padx=20, pady=(14, 6), anchor="w")
+                 ).pack(padx=20, pady=(14, 2), anchor="w")
+        tk.Label(win, text="双击条目，或选中后按回车 / 点「确定」", bg=BG, fg=FG_DIM,
+                 font=tv_font(10)).pack(padx=20, pady=(0, 6), anchor="w")
         box = tk.Listbox(win, bg=PANEL, fg=FG, width=70, height=min(8, len(items)),
                          font=("Consolas", 10), highlightthickness=1,
                          highlightbackground="#333", selectbackground=ACCENT)
         for it in items:
             box.insert("end", it)
         box.pack(padx=20, pady=4)
+        box.selection_set(0)          # 默认选中第一条，回车即可确认
+        box.activate(0)
         box.focus_set()
 
         def pick(_e=None):
             sel = box.curselection()
-            if sel:
-                win.destroy()
-                on_pick(box.get(sel[0]))
+            if not sel:
+                return
+            # 关键：必须先取值再 destroy —— win.destroy() 会连带销毁 Listbox，
+            # 之后再 box.get() 会抛 TclError，导致 on_pick 永远不被调用
+            value = box.get(sel[0])
+            win.destroy()
+            on_pick(value)
         box.bind("<Return>", pick)
         box.bind("<Double-Button-1>", pick)
+
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=20, pady=(10, 14))
+        FocusLabel(bar, text="确定", bg=FOCUS_BG, fg=FOCUS_FG, font=tv_font(11, True),
+                   on_select=pick, padx=18, pady=6).pack(side="right")
+        FocusLabel(bar, text="取消", bg=PANEL_HI, fg=FG, font=tv_font(10),
+                   on_select=win.destroy, padx=14, pady=6).pack(side="right", padx=(0, 8))
         win.bind("<Escape>", lambda e: win.destroy())
 
     def _select_dialog(self, tip, options, current, on_pick):

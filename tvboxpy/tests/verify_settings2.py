@@ -24,7 +24,7 @@ def find_win():
                 exe = win32process.GetModuleFileNameEx(ph, 0).lower()
             except Exception:
                 exe = ''
-            if exe.endswith('tvboxpy.exe'):
+            if exe.endswith('TVBox4Win.exe'):
                 res.append(hh)
     win32gui.EnumWindows(cb, None)
     return res[0] if res else None
@@ -136,9 +136,9 @@ def find_accent_btn(h, min_px=50):
 
 
 # ------------------------------------------------ main ----
-subprocess.run(['taskkill', '/F', '/IM', 'tvboxpy.exe'], capture_output=True)
+subprocess.run(['taskkill', '/F', '/IM', 'TVBox4Win.exe'], capture_output=True)
 time.sleep(2)
-subprocess.Popen([D + r'\tvboxpy.exe'], cwd=D)
+subprocess.Popen([D + r'\TVBox4Win.exe'], cwd=D)
 h = None
 for _ in range(45):
     time.sleep(1)
@@ -196,4 +196,4 @@ if btn:
         time.sleep(5)
         shot('v2_play%d' % (i+1))
 print('done', flush=True)
-subprocess.run(['taskkill', '/F', '/IM', 'tvboxpy.exe'], capture_output=True)
+subprocess.run(['taskkill', '/F', '/IM', 'TVBox4Win.exe'], capture_output=True)

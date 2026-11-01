@@ -175,6 +175,9 @@ class ApiConfig:
         网络失败时回退读本地缓存（对应 Java onError 读缓存配置）"""
         def run():
             if not self.load_lock.acquire(blocking=False):
+                # 已有加载在跑：静默 return 会让调用方毫无反馈，必须报错
+                if err_cb:
+                    err_cb("已有配置正在加载，请稍候再试")
                 return
             try:
                 req_url = clan_to_address(api_url)
@@ -209,6 +212,9 @@ class ApiConfig:
                 self.last_from_cache = from_cache
                 if ok_cb:
                     ok_cb()
+            except Exception as e:      # 线程里抛异常会静默丢失，转成回调告知界面
+                if err_cb:
+                    err_cb(f"配置加载异常：{e}")
             finally:
                 self.load_lock.release()
         threading.Thread(target=run, daemon=True).start()
