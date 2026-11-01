@@ -38,6 +38,8 @@ reference/app/libs/
 
 # ---------- 智能体工作目录 / 系统 ----------
 .workbuddy/
+.gradle/
+tvbox4win_preview.png
 Thumbs.db
 desktop.ini
 .DS_Store

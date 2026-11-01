@@ -2,7 +2,7 @@
 
 **TVBox4Win** = TVBox **for** Windows：把安卓 TV 上流行的影视聚合播放器 TVBox 完整搬到 Windows 桌面。
 
-当前版本：**v0.9.3**（版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
+当前版本：**v0.9.4**（版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
 
 把安卓 TV 上流行的影视聚合播放器 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 复刻到 Windows 桌面：
 **Python 3 + tkinter + libmpv** 实现，单文件 EXE 即可运行，UI 与交互按原版逐页对齐。
@@ -11,10 +11,10 @@
 
 ## 📥 免安装下载（推荐）
 
-不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases/latest) 下载 `TVBox4Win-v0.9.3-win64.zip`：
+不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases/latest) 下载 `TVBox4Win-v0.9.4-win64.zip`：
 
 1. 解压到任意可写目录
-2. 双击 `tvboxpy.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
+2. 双击 `TVBox4Win.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
 3. 首次运行如遇 SmartScreen 拦截，点「更多信息 → 仍要运行」
 
 > ### ⚠️ 强烈建议先安装 Java 环境（JDK 17+）
@@ -29,6 +29,16 @@
 >
 > 建议两个都装上：`Node.js` + `JDK 17+`，这样绝大多数接口配置里的源都能正常打开。
 
+### 📚 版本历史（每个版本独立打包，互不覆盖）
+
+每个 Release 都是独立附件，想留在旧版直接下对应版本即可：
+
+| 版本 | 主要变化 | 下载 |
+|---|---|---|
+| **v0.9.4**（最新） | 直播页整页重构（两层列表 + 进入即播）、修 Esc 退不出的卡死、全局频道编号 + EPG 节目单 | [v0.9.4](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.4) |
+| v0.9.3 | 自定义直播源（点播/直播双输入、直播历史、txt/m3u/JSON 解析） | [v0.9.3](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.3) |
+| v0.9.2 | 全新自绘应用图标、开始版本号体系 | [v0.9.2](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.2) |
+
 ---
 
 ## ✨ 功能特性
@@ -42,7 +52,7 @@
 | 详情页 | 影片信息 chips（年份/地区/类型）、多线路多选集（千集长剧分批渲染不卡顿）、播放地址展示、收藏 / 快速搜索 | `DetailActivity` |
 | 视频播放 | libmpv 全屏沉浸式播放；悬浮控制栏（4 秒无操作自动隐藏）；断点续播；播完自动连播 | `PlayActivity` |
 | 播放器控制栏 | 暂停/上一集/下一集/重播/全屏/音量/倍速/选集 + 可拖动进度条（当前时间/总时长），与原版 `player_vod_control_view.xml` 同布局 | 同左 |
-| 直播 | lives 接口加载频道分组，EPG 节目单 | `LivePlayActivity` |
+| 直播 | 全屏播放层 + 左侧两层列表（分组列 / 频道列），进入即自动播放；全局台号与数字键选台一致；自定义直播源（txt/m3u/TVBox 配置）；EPG 节目单（XMLTV/JSON，当前▶+下一个节目）；顶栏返回 + 悬浮控制栏，5 秒无操作自动隐藏 | `LivePlayActivity` |
 | 收藏/历史 | SQLite 持久化，历史上限自动裁剪（30/50/100 条可选），历史卡片显示进度与上次观看位置 | `VodRecord` |
 | 推送 | 手机扫码/HTTP 推送播放链接到桌面播放 | `PushActivity` |
 | 设置 | 配置地址（点播 + 直播双输入）、配置历史、直播地址（自定义直播源 + 直播历史）、首页站源、首页推荐、解码方式（硬解/软解）、画面缩放（默认/16:9/4:3/填充/原始）、历史上限、下次进入、清空缓存 | `ModelSettingFragment` / `ApiDialog` |
