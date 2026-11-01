@@ -21,7 +21,9 @@ HOME_REC_NAMES = {0: "豆瓣热播", 1: "站点推荐", 2: "观看历史"}
 # 解码方式（对应 IJK_CODEC：硬解码 / 软解码，映射 mpv hwdec auto/no）
 CODEC_NAMES = ("硬解码", "软解码")
 # 画面缩放（对应 PLAY_SCALE / PlayerHelper.getScaleName）
-SCALE_NAMES = {0: "默认", 1: "16:9", 2: "4:3", 3: "填充", 4: "原始"}
+SCALE_NAMES = {0: "默认", 1: "16:9", 2: "4:3", 3: "填充", 4: "裁剪", 5: "原始"}
+# 字幕字号（0=跟随视频，其余为像素）
+SUB_FONT_NAMES = {0: "跟随视频", 28: "小", 36: "中", 42: "大", 48: "特大"}
 # 历史记录上限（对应 HISTORY_NUM / HistoryHelper.hisNumArray）
 HIS_NUM_ARRAY = (30, 50, 100)
 
@@ -44,9 +46,29 @@ class Page(tk.Frame):
         self.status = tk.Label(self, text="", bg=BG, fg=FG_DIM, font=tv_font(11))
         self.status.pack(side="bottom", fill="x", padx=24, pady=4)
 
-        # 网格卡片（截图同款：2 列，方向键导航）
-        grid = tk.Frame(self, bg=BG)
-        grid.pack(expand=True)
+        # 网格卡片（截图同款：2 列，方向键导航）；卡片变多后需要滚动
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill="both", expand=True)
+        canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
+        sb = tk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        grid = tk.Frame(canvas, bg=BG)
+        grid.bind("<Configure>", lambda e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+        self._win = canvas.create_window((0, 0), window=grid, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
+            self._win, width=e.width))
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self._canvas = canvas
+        self._scroll_inner = grid
+
+        def _wheel(e):
+            try:
+                canvas.yview_scroll(-e.delta // 120, "units")
+            except tk.TclError:
+                pass
+        canvas.bind_all("<MouseWheel>", _wheel)
         for c in range(2):
             grid.grid_columnconfigure(c, weight=1)
 
@@ -55,12 +77,43 @@ class Page(tk.Frame):
         self._add_card(grid, "配置地址", full=True, cb=self._edit_api)
         self._add_card(grid, "直播地址", full=True, cb=self._edit_live)
         self._add_card(grid, "配置历史", full=True, cb=self._pick_hist)
+        self._add_card(grid, "数据备份", full=True, cb=self._backup_data)
+        self._add_card(grid, "数据恢复", full=True, cb=self._restore_data)
         self._add_card(grid, "首页站源", cb=self._goto_grid)
         self._add_card(grid, "首页推荐", cb=self._pick_home_rec)
         self._add_card(grid, "解码方式", cb=self._pick_codec)
         self._add_card(grid, "画面缩放", cb=self._pick_scale)
         self._add_card(grid, "历史上限", cb=self._pick_his_num)
         self._add_card(grid, "下次进入", cb=self._toggle_home_page)
+        self._add_card(grid, "默认倍速", cb=self._pick_speed)
+        self._add_card(grid, "字幕字号", cb=self._pick_sub_size)
+        self._add_card(grid, "弹幕源", cb=self._edit_danmaku_api)
+        self._add_card(grid, "直播加密分组", cb=self._clear_live_groups)
+        self._add_card(grid, "快速搜索", cb=lambda: self._toggle_flag(
+            "快速搜索", hawk.FAST_SEARCH, True))
+        self._add_card(grid, "自动换线", cb=lambda: self._toggle_flag(
+            "自动换线", hawk.AUTO_SWITCH_LINE, True))
+        self._add_card(grid, "自动播放", cb=lambda: self._toggle_flag(
+            "自动播放", hawk.AUTO_PLAY, False))
+        self._add_card(grid, "弹幕", cb=lambda: self._toggle_flag(
+            "弹幕", hawk.DANMAKU_ENABLE, False))
+        self._add_card(grid, "记住倍速", cb=lambda: self._toggle_flag(
+            "记住倍速", hawk.SPEED_MEMORY, False))
+        self._add_card(grid, "防休眠", cb=lambda: self._toggle_flag(
+            "防休眠", hawk.KEEP_AWAKE, False))
+        self._add_card(grid, "播放缓存", cb=lambda: self._toggle_flag(
+            "播放缓存", hawk.PLAYER_CACHE, False))
+        self._add_card(grid, "历史合并", cb=lambda: self._toggle_flag(
+            "历史合并", hawk.HISTORY_MERGE, False))
+        self._add_card(grid, "直播倒序", cb=lambda: self._toggle_flag(
+            "直播倒序", hawk.LIVE_REVERSE, False))
+        self._add_card(grid, "首页壁纸", cb=lambda: self._toggle_flag(
+            "首页壁纸", hawk.WALLPAPER, False))
+        self._add_card(grid, "壁纸图片", cb=self._pick_wallpaper)
+        self._add_card(grid, "开发者模式", cb=lambda: self._toggle_flag(
+            "开发者模式", hawk.DEVELOPER_MODE, False))
+        self._add_card(grid, "查看日志", cb=self._open_log)
+        self._add_card(grid, "打开数据目录", cb=self._open_data_dir)
         self._add_card(grid, "清空缓存", cb=self._clear_cache)
         self._add_card(grid, "关于", cb=self._show_about)
         self._refresh_values()
@@ -96,9 +149,25 @@ class Page(tk.Frame):
             if self._col == 2:
                 self._row, self._col = self._row + 1, 0
         card._var, card._name = var, name
+        try:  # 键盘移动焦点时自动滚动到可见区域
+            card.bind("<FocusIn>", lambda e, c=card: self._ensure_visible(c),
+                      add="+")
+        except tk.TclError:
+            pass
         self._cards.append(card)
         self._vars[name] = var
         return card
+
+    def _ensure_visible(self, card):
+        try:
+            y = card.winfo_y()
+            total = self._scroll_inner.winfo_height() or 1
+            view_h = self._canvas.winfo_height() or 1
+            first = self._canvas.canvasy(0)
+            if y < first or y + card.winfo_height() > first + view_h:
+                self._canvas.yview_moveto(max(0.0, (y - 12) / total))
+        except (tk.TclError, AttributeError):
+            pass
 
     def _set_value(self, name, value):
         if name in self._vars:
@@ -129,7 +198,39 @@ class Page(tk.Frame):
         self._set_value("历史上限",
                         f"{HIS_NUM_ARRAY[hn]} 条" if 0 <= hn < 3 else "30 条")
         self._set_value("下次进入", "直播" if self._home_page() == "live" else "点播")
+        try:
+            sp = float(hawk.get(hawk.PLAY_SPEED, 1.0) or 1.0)
+        except (TypeError, ValueError):
+            sp = 1.0
+        self._set_value("默认倍速", f"{sp:g}x")
+        try:
+            fs = int(hawk.get(hawk.SUB_FONT_SIZE, 0) or 0)
+        except (TypeError, ValueError):
+            fs = 0
+        self._set_value("字幕字号", SUB_FONT_NAMES.get(fs, f"{fs}px"))
+        dm_api = str(hawk.get(hawk.DANMAKU_API, "") or "")
+        self._set_value("弹幕源", self._short(dm_api) if dm_api else "未设置")
+        groups = hawk.get(hawk.LIVE_PASSWORD_GROUPS, []) or []
+        self._set_value("直播加密分组", f"已解锁 {len(groups)} 组" if groups else "")
+        self._set_value("快速搜索", self._on_off(hawk.get(hawk.FAST_SEARCH, True)))
+        self._set_value("自动换线", self._on_off(hawk.get(hawk.AUTO_SWITCH_LINE, True)))
+        self._set_value("自动播放", self._on_off(hawk.get(hawk.AUTO_PLAY, False)))
+        self._set_value("弹幕", self._on_off(hawk.get(hawk.DANMAKU_ENABLE, False)))
+        self._set_value("记住倍速", self._on_off(hawk.get(hawk.SPEED_MEMORY, False)))
+        self._set_value("防休眠", self._on_off(hawk.get(hawk.KEEP_AWAKE, False)))
+        self._set_value("播放缓存", self._on_off(hawk.get(hawk.PLAYER_CACHE, False)))
+        self._set_value("历史合并", self._on_off(hawk.get(hawk.HISTORY_MERGE, False)))
+        self._set_value("直播倒序", self._on_off(hawk.get(hawk.LIVE_REVERSE, False)))
+        self._set_value("首页壁纸", self._on_off(hawk.get(hawk.WALLPAPER, False)))
+        wp = str(hawk.get(hawk.WALLPAPER_OVERRIDE, "") or "")
+        self._set_value("壁纸图片",
+                        self._short(os.path.basename(wp), 24) if wp else "默认渐变")
+        self._set_value("开发者模式", self._on_off(hawk.get(hawk.DEVELOPER_MODE, False)))
         self._set_value("关于", f"v{VERSION}")
+
+    @staticmethod
+    def _on_off(value):
+        return "开" if value else "关"
 
     @staticmethod
     def _short(url, n=44):
@@ -386,6 +487,204 @@ class Page(tk.Frame):
         self._set_status("下次进入将打开 " +
                               ("直播" if cur != "live" else "点播"))
 
+    # ------------------------------------------------ 开关类 ----
+    def _toggle_flag(self, name, key, default=False):
+        """通用开/关切换卡片"""
+        on = not bool(hawk.get(key, default))
+        hawk.put(key, 1 if on else 0)
+        self._refresh_values()
+        self._set_status(f"{name}已{'开启' if on else '关闭'}")
+
+    def _pick_speed(self):
+        """默认倍速（对应 HawkConfig.PLAY_SPEED）"""
+        from .ui_play import SPEEDS
+        try:
+            cur = float(hawk.get(hawk.PLAY_SPEED, 1.0) or 1.0)
+        except (TypeError, ValueError):
+            cur = 1.0
+        idx = min(range(len(SPEEDS)), key=lambda i: abs(SPEEDS[i] - cur))
+        self._select_dialog("默认播放倍速",
+                            list(enumerate(f"{s:g}x" for s in SPEEDS)),
+                            idx, lambda v: self._apply_speed(SPEEDS[v]))
+
+    def _apply_speed(self, speed):
+        hawk.put(hawk.PLAY_SPEED, float(speed))
+        self._refresh_values()
+        self._set_status(f"默认倍速已设为 {speed:g}x")
+
+    def _pick_sub_size(self):
+        """字幕字号（对应 HawkConfig.SUB_FONT_SIZE）"""
+        try:
+            cur = int(hawk.get(hawk.SUB_FONT_SIZE, 0) or 0)
+        except (TypeError, ValueError):
+            cur = 0
+        items = list(SUB_FONT_NAMES.items())
+        idx = next((i for i, (v, _n) in enumerate(items) if v == cur), 0)
+        self._select_dialog("字幕字号",
+                            [(i, n) for i, (_v, n) in enumerate(items)],
+                            idx, lambda i: self._apply_sub_size(items[i][0]))
+
+    def _apply_sub_size(self, size):
+        hawk.put(hawk.SUB_FONT_SIZE, int(size))
+        self._refresh_values()
+        self._set_status(f"字幕字号已设为「{SUB_FONT_NAMES.get(size, size)}」")
+
+    def _edit_danmaku_api(self):
+        """弹幕接口模板（留空=只用本地弹幕文件）"""
+        cur = str(hawk.get(hawk.DANMAKU_API, "") or "")
+
+        def save(text):
+            if text:
+                hawk.put(hawk.DANMAKU_API, text)
+                self._set_status("弹幕接口已保存")
+            else:
+                hawk.delete(hawk.DANMAKU_API)
+                self._set_status("弹幕接口已清空")
+            self._refresh_values()
+        self._text_dialog("弹幕源", "弹幕接口地址（可用 {name} / {ep} 占位符，留空清除）",
+                          cur, save)
+
+    def _clear_live_groups(self):
+        """清除已解锁的直播加密分组（下次需要重新输入密码）"""
+        groups = hawk.get(hawk.LIVE_PASSWORD_GROUPS, []) or []
+        if not groups:
+            self._set_status("暂无已解锁的加密分组")
+            return
+
+        def do_clear():
+            hawk.delete(hawk.LIVE_PASSWORD_GROUPS)
+            self._refresh_values()
+            self._set_status("已清除直播加密分组密码")
+        self._confirm_dialog("直播加密分组",
+                             f"已解锁 {len(groups)} 个加密分组，清除后需要重新输入密码。确定清除？",
+                             do_clear)
+
+    def _pick_wallpaper(self):
+        """自定义首页壁纸：选择本地图片 / 恢复默认渐变"""
+        win = tk.Toplevel(self)
+        win.title("壁纸图片")
+        win.configure(bg=BG)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        tk.Label(win, text="壁纸图片", bg=BG, fg=FG,
+                 font=tv_font(14, True)).pack(padx=24, pady=(14, 4), anchor="w")
+        cur = str(hawk.get(hawk.WALLPAPER_OVERRIDE, "") or "")
+        tk.Label(win, text=cur or "当前使用默认渐变", bg=BG, fg=FG_DIM,
+                 font=tv_font(10), wraplength=420).pack(padx=24, anchor="w")
+
+        def choose():
+            win.destroy()
+            p = filedialog.askopenfilename(
+                parent=self.winfo_toplevel(), title="选择壁纸",
+                filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp *.gif"),
+                           ("所有文件", "*.*")])
+            if not p:
+                return
+            hawk.put(hawk.WALLPAPER_OVERRIDE, p)
+            hawk.put(hawk.WALLPAPER, 1)
+            self._refresh_values()
+            self._set_status("壁纸已设置：" + p)
+
+        def clear():
+            win.destroy()
+            hawk.delete(hawk.WALLPAPER_OVERRIDE)
+            self._refresh_values()
+            self._set_status("已恢复默认渐变壁纸")
+
+        row = tk.Frame(win, bg=BG)
+        row.pack(padx=24, pady=12)
+        FocusLabel(row, text="选择图片…", bg=FOCUS_BG, fg=FOCUS_FG,
+                   font=tv_font(11, True), padx=16, pady=6,
+                   on_select=choose).pack(side="left", padx=6)
+        FocusLabel(row, text="恢复默认", bg=PANEL, fg=FG, font=tv_font(11),
+                   padx=16, pady=6, on_select=clear).pack(side="left", padx=6)
+        FocusLabel(row, text="取消", bg=PANEL, fg=FG, font=tv_font(11),
+                   padx=16, pady=6,
+                   on_select=win.destroy).pack(side="left", padx=6)
+        win.bind("<Escape>", lambda e: win.destroy())
+
+    # ------------------------------------------------ 数据备份/恢复 ----
+    def _backup_data(self):
+        """把 tvbox.db + hawk.json 打包成 zip（换机/重装前一键留档）"""
+        from .paths import data_path
+        import time as _t
+        import zipfile
+        path = filedialog.asksaveasfilename(
+            parent=self.winfo_toplevel(), title="备份数据",
+            defaultextension=".zip",
+            initialfile="tvbox_backup_%s.zip" % _t.strftime("%Y%m%d"),
+            filetypes=[("Zip 备份", "*.zip")])
+        if not path:
+            return
+        try:
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+                for name in ("tvbox.db", "hawk.json"):
+                    p = data_path(name)
+                    if os.path.isfile(p):
+                        z.write(p, name)
+        except Exception as ex:
+            self._set_status(f"备份失败：{ex}")
+            return
+        self._set_status(f"已备份到 {path}")
+
+    def _restore_data(self):
+        path = filedialog.askopenfilename(
+            parent=self.winfo_toplevel(), title="恢复数据",
+            filetypes=[("Zip 备份", "*.zip"), ("所有文件", "*.*")])
+        if not path:
+            return
+        self._confirm_dialog(
+            "恢复数据", "恢复将覆盖当前的观看历史、收藏和全部设置，确定继续？",
+            lambda: self._do_restore(path))
+
+    def _do_restore(self, path):
+        import zipfile
+        from .paths import data_path
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = set(z.namelist())
+                wanted = [n for n in ("tvbox.db", "hawk.json") if n in names]
+                if not wanted:
+                    raise ValueError("不是有效的备份文件（缺少 tvbox.db / hawk.json）")
+                # 先关掉 sqlite 连接，释放文件句柄再覆盖
+                from . import store
+                store.reset_connection()
+                for name in wanted:
+                    with z.open(name) as src, open(data_path(name), "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        except Exception as ex:
+            self._set_status(f"恢复失败：{ex}")
+            return
+        hawk.reload()
+        try:
+            from . import data_api, store
+            data_api.clear_caches()
+            store.reset_connection()   # 下次访问时按新库重建连接
+        except Exception:
+            pass
+        self._refresh_values()
+        self._set_status("数据已恢复，返回主页后生效")
+
+    # ------------------------------------------------ 开发者 ----
+    def _open_log(self):
+        from .paths import data_path
+        p = data_path("error.log")
+        try:
+            if not os.path.isfile(p):
+                open(p, "w", encoding="utf-8").close()
+            os.startfile(p)
+            self._set_status(f"已打开日志：{p}")
+        except (AttributeError, OSError) as ex:
+            self._set_status(f"日志位置：{p}（{ex}）")
+
+    def _open_data_dir(self):
+        from .paths import APP_BASE
+        try:
+            os.startfile(APP_BASE)
+            self._set_status(f"已打开数据目录：{APP_BASE}")
+        except (AttributeError, OSError) as ex:
+            self._set_status(f"数据目录：{APP_BASE}（{ex}）")
+
     def _clear_cache(self):
         try:
             from . import data_api
@@ -492,3 +791,67 @@ class Page(tk.Frame):
                  justify="left").pack(padx=24, pady=20)
         FocusLabel(win, text="关闭", font=tv_font(12, True),
                    on_select=win.destroy).pack(pady=(0, 14))
+
+    def _text_dialog(self, title, tip, value, on_ok):
+        """单行文本输入弹窗（弹幕接口等）"""
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.configure(bg=BG)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        tk.Label(win, text=title, bg=BG, fg=FG,
+                 font=tv_font(14, True)).pack(padx=20, pady=(14, 2), anchor="w")
+        tk.Label(win, text=tip, bg=BG, fg=FG_DIM,
+                 font=tv_font(10)).pack(padx=20, anchor="w")
+        ent = tk.Entry(win, bg=PANEL, fg=FG, font=("Consolas", 11), width=70,
+                       insertbackground=FG, highlightthickness=1,
+                       highlightbackground="#333")
+        ent.insert(0, value or "")
+        ent.pack(padx=20, pady=8, fill="x")
+        ent.focus_set()
+        ent.icursor("end")
+
+        def confirm(_e=None):
+            text = ent.get().strip()
+            win.destroy()
+            on_ok(text)
+        ent.bind("<Return>", confirm)
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(fill="x", padx=20, pady=(4, 14))
+        FocusLabel(bar, text="确定", bg=FOCUS_BG, fg=FOCUS_FG,
+                   font=tv_font(11, True), padx=18, pady=6,
+                   on_select=confirm).pack(side="right")
+        FocusLabel(bar, text="取消", bg=PANEL_HI, fg=FG, font=tv_font(10),
+                   padx=14, pady=6,
+                   on_select=win.destroy).pack(side="right", padx=(0, 8))
+        win.bind("<Escape>", lambda e: win.destroy())
+
+    def _confirm_dialog(self, title, message, on_yes):
+        """确认弹窗（不可撤销操作）"""
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.configure(bg=BG)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        win.geometry("540x210")
+        tk.Label(win, text=title, bg=BG, fg=FG,
+                 font=tv_font(15, True)).pack(pady=(22, 8))
+        tk.Label(win, text=message, bg=BG, fg=FG_DIM, font=tv_font(12),
+                 wraplength=460, justify="center").pack(pady=(0, 18))
+
+        def yes():
+            win.destroy()
+            on_yes()
+        row = tk.Frame(win, bg=BG)
+        row.pack()
+        FocusLabel(row, text="取消", bg=PANEL, fg=FG, font=tv_font(12),
+                   padx=24, pady=6,
+                   on_select=win.destroy).pack(side="left", padx=10)
+        FocusLabel(row, text="确定", bg=ACCENT, fg="#FFFFFF",
+                   font=tv_font(12, True), padx=24, pady=6,
+                   on_select=yes).pack(side="left", padx=10)
+        win.bind("<Escape>", lambda e: win.destroy())
+        try:
+            win.focus_force()
+        except tk.TclError:
+            pass

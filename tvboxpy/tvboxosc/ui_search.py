@@ -239,10 +239,19 @@ class Page(tk.Frame):
         self._update_status()
         threading.Thread(target=self._search_run, args=(kw, token), daemon=True).start()
 
+    @staticmethod
+    def _fast_search():
+        """快速搜索开关（HawkConfig.FAST_SEARCH，默认开）"""
+        try:
+            return bool(hawk.get(hawk.FAST_SEARCH, True))
+        except Exception:
+            return True
+
     def _render_chips(self, kw):
         for w in self.chip_bar.winfo_children():
             w.destroy()
-        for word in split_words(kw)[:6]:
+        words = split_words(kw) if self._fast_search() else [kw]
+        for word in words[:6]:
             FocusLabel(self.chip_bar, text=word, bg=PANEL_HI, fg=FG,
                        font=tv_font(10), pady=2,
                        on_select=lambda w0=word: self._search_word(w0)
@@ -250,7 +259,9 @@ class Page(tk.Frame):
 
     def _search_run(self, kw, token):
         from concurrent.futures import ThreadPoolExecutor, wait
-        beans = [b for b in apiconfig.api_config.source_bean_list if b.searchable == 1]
+        # searchable 1/2 都参与搜索（2 常见于 js 壳源，原版同样会搜）
+        beans = [b for b in apiconfig.api_config.source_bean_list
+                 if b.searchable in (1, 2)]
 
         def rank(b):
             api = str(b.api or "")
@@ -261,10 +272,14 @@ class Page(tk.Frame):
         self._total = len(beans)
         ui_thread.run(self._update_status)
 
-        main_kw = clean_keyword(kw)
-        kws = [main_kw] if main_kw else [kw]
-        if main_kw != kw:
-            kws.append(kw)
+        if self._fast_search():
+            # 快速搜索：主标题优先，没结果再搜全名
+            main_kw = clean_keyword(kw)
+            kws = [main_kw] if main_kw else [kw]
+            if main_kw != kw:
+                kws.append(kw)
+        else:
+            kws = [kw]
         lock = threading.Lock()
 
         def probe(bean):

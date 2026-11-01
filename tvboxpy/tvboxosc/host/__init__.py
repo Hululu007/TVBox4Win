@@ -47,6 +47,14 @@ def node_path():
     return None
 
 
+def keep_awake(on):
+    """播放/直播期间阻止系统休眠（各平台自行实现，失败返回 False）"""
+    try:
+        return bool(_impl.keep_awake(bool(on)))
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------- 播放后端
 
 class _PlayerFacade:

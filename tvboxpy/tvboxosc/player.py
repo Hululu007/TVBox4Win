@@ -57,27 +57,206 @@ class MpvPlayer:
             pass
 
     @staticmethod
-    def apply_scale(core):
-        """画面缩放（对应 PlayerHelper.getScaleName / VideoView SCREEN_SCALE_*）"""
-        try:
-            from . import hawk
-            scale = int(hawk.get(hawk.PLAY_SCALE, 0))
-        except Exception:
-            scale = 0
+    def apply_scale(core, scale=None, size=None):
+        """画面缩放（对应 PlayerHelper.getScaleName / VideoView SCREEN_SCALE_*）
+
+        0 默认 / 1 16:9 / 2 4:3 / 3 填充（拉伸铺满，不裁切）/ 4 裁剪（保持比例
+        裁边铺满）/ 5 原始（不缩放）。原版把「填充」实现成裁剪，这里按字面
+        语义拆成两个模式，避免拉伸和裁剪被混为一谈。
+        """
+        if scale is None:
+            try:
+                from . import hawk
+                scale = int(hawk.get(hawk.PLAY_SCALE, 0))
+            except (TypeError, ValueError):
+                scale = 0
         try:
             core["panscan"] = 0.0
             core["video-unscaled"] = "no"
             core["video-aspect-override"] = "no"
+        except Exception:
+            return
+        try:
             if scale == 1:      # 16:9
                 core["video-aspect-override"] = "16:9"
             elif scale == 2:    # 4:3
                 core["video-aspect-override"] = "4:3"
-            elif scale == 3:    # 填充（保持比例裁剪铺满窗口）
+            elif scale == 3:    # 填充：强制成窗口比例 = 拉伸铺满
+                w = h = 0
+                if size:
+                    w, h = int(size[0] or 0), int(size[1] or 0)
+                if not (w and h):
+                    w = int(core["osd-width"] or 0)
+                    h = int(core["osd-height"] or 0)
+                if w and h:
+                    core["video-aspect-override"] = "%d:%d" % (w, h)
+            elif scale == 4:    # 裁剪：保持比例放大到铺满窗口后裁边
                 core["panscan"] = 1.0
-            elif scale == 4:    # 原始（不缩放）
+            elif scale == 5:    # 原始：按源码分辨率显示
                 core["video-unscaled"] = "yes"
         except Exception:
             pass
+
+    @staticmethod
+    def scale_name(scale):
+        return {0: "默认", 1: "16:9", 2: "4:3", 3: "填充", 4: "裁剪",
+                5: "原始"}.get(scale, "默认")
+
+    # ---- 通用属性 / 轨道 / 字幕 / 缓存 ----
+
+    def get_property(self, name, default=None):
+        try:
+            val = self.mpv[name]
+            return default if val is None else val
+        except Exception:
+            return default
+
+    def set_property(self, name, value):
+        try:
+            self.mpv[name] = value
+            return True
+        except Exception:
+            return False
+
+    def track_list(self, kind=None):
+        """mpv 轨道列表（kind=audio/sub/video 时过滤）"""
+        try:
+            tracks = self.mpv.track_list or []
+        except Exception:
+            return []
+        out = []
+        for t in tracks:
+            if not isinstance(t, dict):
+                try:
+                    t = dict(t)
+                except Exception:
+                    continue
+            if kind and t.get("type") != kind:
+                continue
+            out.append(t)
+        return out
+
+    def set_track(self, kind, track_id):
+        """选择轨道：kind=audio/sub/video；track_id=None 表示关闭该类型"""
+        prop = {"audio": "aid", "video": "vid", "sub": "sid"}.get(kind)
+        if not prop:
+            return False
+        return self.set_property(prop, "no" if track_id is None else track_id)
+
+    def current_track(self, kind):
+        try:
+            prop = {"audio": "aid", "video": "vid", "sub": "sid"}[kind]
+            return self.mpv[prop]
+        except Exception:
+            return None
+
+    def add_subtitle(self, path, select=True):
+        """加载外挂字幕/弹幕 ASS，返回新轨道 id（失败 None）"""
+        try:
+            self.mpv.command("sub-add", str(path), "select" if select else "auto")
+        except Exception:
+            return None
+        for t in self.track_list("sub"):
+            try:
+                if str(t.get("external-filename") or "") == str(path):
+                    return t.get("id")
+            except Exception:
+                continue
+        return self.current_track("sub")
+
+    def remove_subtitle(self, track_id):
+        try:
+            self.mpv.command("sub-remove", str(track_id))
+            return True
+        except Exception:
+            return False
+
+    def set_subtitle_visible(self, on):
+        return self.set_property("sub-visibility", bool(on))
+
+    def get_sub_delay(self):
+        try:
+            return float(self.mpv["sub-delay"] or 0)
+        except Exception:
+            return 0.0
+
+    def set_sub_delay(self, seconds):
+        try:
+            self.mpv["sub-delay"] = float(seconds)
+            return True
+        except Exception:
+            return False
+
+    def set_sub_font_size(self, size):
+        try:
+            self.mpv["sub-font-size"] = int(size or 0)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def apply_subtitle_style(core):
+        """应用设置里的字幕字号/延迟"""
+        try:
+            from . import hawk
+            size = int(hawk.get(hawk.SUB_FONT_SIZE, 0) or 0)
+            delay = float(hawk.get(hawk.SUB_DELAY, 0) or 0)
+        except (TypeError, ValueError):
+            size, delay = 0, 0.0
+        try:
+            core["sub-font-size"] = size
+            core["sub-delay"] = delay
+        except Exception:
+            pass
+
+    def set_cache(self, enabled):
+        """播放缓存（对应 IJK_CACHE_PLAY）：开启后允许网络流预读缓冲"""
+        try:
+            if enabled:
+                self.mpv["cache"] = "yes"
+                self.mpv["cache-secs"] = 20
+                self.mpv["demuxer-readahead-secs"] = 20
+            else:
+                self.mpv["cache"] = "no"
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def apply_cache(core):
+        try:
+            from . import hawk
+            enabled = bool(hawk.get(hawk.PLAYER_CACHE, 0))
+        except Exception:
+            enabled = False
+        if enabled:
+            try:
+                core["cache"] = "yes"
+                core["cache-secs"] = 20
+                core["demuxer-readahead-secs"] = 20
+            except Exception:
+                pass
+
+    def cache_speed(self):
+        """当前缓冲速度（字节/秒），拿不到返回 0"""
+        val = self.get_property("cache-speed", 0)
+        try:
+            return float(val or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def video_info(self):
+        """分辨率 / 帧率 / 编码 / 硬解状态（OSD 用）"""
+        w = self.get_property("width", 0) or 0
+        h = self.get_property("height", 0) or 0
+        fps = self.get_property("estimated-vf-fps", 0) or \
+            self.get_property("container-fps", 0) or 0
+        return {
+            "width": int(w or 0), "height": int(h or 0),
+            "fps": float(fps or 0),
+            "codec": str(self.get_property("video-codec", "") or ""),
+            "hwdec": str(self.get_property("hwdec-current", "") or ""),
+        }
 
     def play(self, url, headers=None):
         # 页面复用/核心重建后，确保拿到可用核心

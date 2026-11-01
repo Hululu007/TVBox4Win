@@ -3,8 +3,10 @@ import os
 import time
 import threading
 import tkinter as tk
+import urllib.parse
 
-from . import store, ui_thread
+from . import hawk, store, ui_thread
+from .paths import data_path
 from .theme import ACCENT, BG, FG, FG_DIM, FocusLabel, tv_font
 from .player import MpvPlayer
 
@@ -15,6 +17,13 @@ BTN_BG = "#26325C"      # 按钮底色（theme.PANEL_HI）
 START_TIMEOUT_MS = 20000
 # 解析看门狗：解析接口卡住超过这么久也当失败，避免「正在获取播放信息」无限等
 RESOLVE_TIMEOUT_MS = 20000
+
+# 倍速档位（对应原版 speedArray，补足 0.75/3.0）
+SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+# 画面缩放档位（0 默认 / 1 16:9 / 2 4:3 / 3 填充 / 4 裁剪 / 5 原始）
+SCALES = [0, 1, 2, 3, 4, 5]
+# 选集面板每页个数（集数很多时避免一次创建上千个控件）
+EPS_PER_PAGE = 60
 
 
 class Failover:
@@ -56,6 +65,41 @@ def _short_reason(text, limit=24):
     return s[:limit] + ("…" if len(s) > limit else "")
 
 
+def resolve_source_text():
+    """最近一次解析来源（直链/网页嗅探/解析接口名/爬虫），OSD 显示用"""
+    try:
+        from . import data_api
+        kind = data_api.LAST_RESOLVE.get("kind") or ""
+        name = data_api.LAST_RESOLVE.get("name") or ""
+        return f"{kind} {name}".strip()
+    except Exception:
+        return ""
+
+
+def _danmaku_ass_path():
+    return data_path("danmaku.ass")
+
+
+def _write_text(path, text):
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8-sig") as f:
+            f.write(text)
+        os.replace(tmp, path)
+        return path
+    except OSError:
+        return ""
+
+
+def _write_danmaku_ass(text):
+    """弹幕原文 → ASS 文件；解析为空返回空串"""
+    from . import danmaku
+    ass = danmaku.build_from_text(text)
+    if not ass:
+        return ""
+    return _write_text(_danmaku_ass_path(), ass)
+
+
 class Page(tk.Frame):
     """对应 ui/activity/PlayActivity.java"""
 
@@ -84,13 +128,27 @@ class Page(tk.Frame):
         self._seek_job = None
         self._save_job = None
         self._speed = 1.0
-        self._speeds = [1.0, 1.25, 1.5, 2.0, 0.5]
+        self._speeds = SPEEDS
+        self._scale = 0
+        self._locked = False
+        self._osd_on = False
+        self._osd_job = None
+        self._sub_path = None      # 用户加载的本地字幕，换集后自动重挂
+        self._dm_path = None       # 弹幕合成的 ASS 文件
+        self._dm_ep = None         # 弹幕对应的集名（避免重复拉取）
         self._app_binds = []
         self._seq = 0  # 播放请求序号：后台解析返回时页面可能已切集/销毁
         self._hide_job = None
         self._cur_pos = 0.0
         self._dur = 0.0
         self._t_start = None  # 起播计时（TVBOXPY_DEBUG 时打印）
+        self._speed = self._initial_speed()
+        try:
+            self._scale = int(hawk.get(hawk.PLAY_SCALE, 0) or 0)
+        except (TypeError, ValueError):
+            self._scale = 0
+        if self._scale not in SCALES:
+            self._scale = 0
 
         # 全屏沉浸播放（对应原版 PlayActivity 全屏）：进入播放页自动全屏，
         # 返回时恢复之前的窗口状态
@@ -125,6 +183,16 @@ class Page(tk.Frame):
         # 失败提示可点击重试（对应原版 setTip 的点击重播）
         self.status.bind("<Button-1>", self._retry_now)
 
+        # 右上角 OSD（分辨率/帧率/倍速/缓冲/时间），按 i 开关
+        self.osd = tk.Label(self, text="", bg="#000000", fg="#DCEEFF",
+                            justify="right", anchor="ne", font=tv_font(11))
+        self.osd.bind("<Button-1>", lambda e: self._toggle_osd())
+
+        # 锁屏遮罩（按 L 解锁）
+        self.lock = tk.Label(self, text="🔒 已锁定\n按 L 键解锁", bg="#000000",
+                             fg=FG_DIM, font=tv_font(18, True))
+        self.lock.bind("<Button-1>", lambda e: self._toggle_lock())
+
         # 沉浸式控制栏：无操作 4 秒后隐藏，鼠标移动/按键/点击唤出
         for seq in ("<Motion>", "<Any-KeyPress>", "<Button-1>"):
             try:
@@ -134,7 +202,7 @@ class Page(tk.Frame):
                 pass
         self._show_chrome()
 
-        # 播放快捷键（对应原版遥控器/键盘操作）
+        # 播放快捷键（对应原版遥控器/键盘操作）；锁定后除 L 外全部屏蔽
         hotkeys = {
             "<space>": self._toggle_pause,      # 播放/暂停
             "<Left>": lambda: self._seek_rel(-10),
@@ -145,10 +213,20 @@ class Page(tk.Frame):
             "<Next>": self._next_ep,            # PageDown 下一集
             "<Key-f>": self._toggle_fullscreen,
             "<Key-F>": self._toggle_fullscreen,
+            "<Key-i>": self._toggle_osd,
+            "<Key-I>": self._toggle_osd,
         }
         for seq, cb in hotkeys.items():
             try:
-                fid = self.app.bind(seq, lambda e, c=cb: (c(), "break")[1], add="+")
+                fid = self.app.bind(seq, self._guard(cb), add="+")
+                self._app_binds.append((seq, fid))
+            except Exception:
+                pass
+        # 锁屏键不经过 guard（否则锁上就解不开）
+        for seq in ("<Key-l>", "<Key-L>"):
+            try:
+                fid = self.app.bind(seq, lambda e: (self._toggle_lock(), "break")[1],
+                                    add="+")
                 self._app_binds.append((seq, fid))
             except Exception:
                 pass
@@ -199,10 +277,12 @@ class Page(tk.Frame):
             self._mk_btn(row, "选集", self._show_series, side="right")
         if len(self.all_urls) > 1:
             self._mk_btn(row, "线路", self._show_lines, side="right")
-        self.speed_btn = FocusLabel(row, text="倍速 1.0x", font=tv_font(12),
-                                    bg=BTN_BG, fg="#FFFFFF",
+        self.speed_btn = FocusLabel(row, text=f"倍速 {self._speed:g}x",
+                                    font=tv_font(12), bg=BTN_BG, fg="#FFFFFF",
                                     on_select=self._cycle_speed, padx=14, pady=5)
         self.speed_btn.pack(side="right", padx=4)
+        # 字幕/音轨/弹幕/画面/OSD/锁屏等次要功能收进「更多」，避免按钮溢出
+        self._mk_btn(row, "更多 ▾", self._show_more, side="right")
 
         # 进度行：当前时间 | 进度条 | 总时长（对应 curr_time / seekBar / total_time）
         prow = tk.Frame(b, bg=CHROME_BG)
@@ -285,7 +365,8 @@ class Page(tk.Frame):
         self._app_binds = []
         for job in (getattr(self, "_pos_job", None), getattr(self, "_seek_job", None),
                     getattr(self, "_save_job", None), getattr(self, "_hide_job", None),
-                    getattr(self, "_watchdog", None), getattr(self, "_resolve_job", None)):
+                    getattr(self, "_watchdog", None), getattr(self, "_resolve_job", None),
+                    getattr(self, "_osd_job", None)):
             if job:
                 try:
                     self.after_cancel(job)
@@ -294,6 +375,8 @@ class Page(tk.Frame):
         self._pos_job = self._seek_job = self._save_job = self._hide_job = None
         self._watchdog = None
         self._resolve_job = None
+        self._osd_job = None
+        self._release_awake()
         try:
             if self.player:
                 self.player.detach()
@@ -307,6 +390,8 @@ class Page(tk.Frame):
             if not self.winfo_exists():
                 return
         except Exception:
+            return
+        if self._locked:      # 锁屏时不弹控制栏
             return
         self.top.place(x=0, y=0, relwidth=1.0, height=42)
         self.bottom.place(x=0, rely=1.0, relwidth=1.0, height=96, anchor="sw")
@@ -326,6 +411,375 @@ class Page(tk.Frame):
             return
         self.top.place_forget()
         self.bottom.place_forget()
+
+    # ---- 锁屏 / OSD / 画面比例 / 更多菜单（P1） ----
+
+    def _guard(self, cb):
+        """快捷键包装：锁屏时只放行锁屏键，其余按键吞掉"""
+        def handler(_e=None):
+            if self._locked:
+                return "break"
+            cb()
+            return "break"
+        return handler
+
+    def _toggle_lock(self):
+        self._locked = not getattr(self, "_locked", False)
+        if self._locked:
+            self.top.place_forget()
+            self.bottom.place_forget()
+            self.lock.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+            self.lock.lift()
+        else:
+            self.lock.place_forget()
+            self._show_chrome()
+        return "break"
+
+    def _toggle_osd(self):
+        self._osd_on = not self._osd_on
+        if self._osd_on:
+            self.osd.place(relx=1.0, x=-14, y=52, anchor="ne")
+            self.osd.lift()
+            self._update_osd()
+            self.status.configure(text="OSD 已开启（i 关闭）")
+            self.after(1500, lambda: self.status.configure(text=""))
+        else:
+            self.osd.place_forget()
+            if self._osd_job:
+                try:
+                    self.after_cancel(self._osd_job)
+                except Exception:
+                    pass
+                self._osd_job = None
+
+    def _update_osd(self):
+        self._osd_job = None
+        if not self._osd_on:
+            return
+        lines = []
+        try:
+            if self.player:
+                info = self.player.video_info()
+                if info["width"] and info["height"]:
+                    res = f"{info['width']}x{info['height']}"
+                    if info["fps"]:
+                        res += f" @{info['fps']:.2f}fps"
+                    lines.append(res)
+                if info["codec"]:
+                    lines.append(info["codec"])
+                lines.append(f"倍速 {self._speed:g}x · 画面 "
+                             f"{MpvPlayer.scale_name(self._scale)}")
+                spd = self.player.cache_speed()
+                if spd > 0:
+                    lines.append(f"缓冲 {spd / 1024 / 1024:.1f} MB/s")
+                src = resolve_source_text()
+                if src:
+                    lines.append(f"解析来自 {src}")
+        except Exception:
+            pass
+        lines.append(time.strftime("%H:%M:%S"))
+        try:
+            self.osd.configure(text="\n".join(lines))
+        except tk.TclError:
+            return
+        self._osd_job = self.after(1000, self._update_osd)
+
+    def _cycle_scale(self):
+        """画面比例循环（对应原版 SCREEN_SCALE_* 六种模式）"""
+        i = SCALES.index(self._scale) if self._scale in SCALES else 0
+        self._scale = SCALES[(i + 1) % len(SCALES)]
+        hawk.put(hawk.PLAY_SCALE, self._scale)
+        if self.player:
+            w = max(1, self.video.winfo_width())
+            h = max(1, self.video.winfo_height())
+            self.player.apply_scale(self.player.mpv, self._scale, (w, h))
+        name = MpvPlayer.scale_name(self._scale)
+        self.status.configure(text=f"画面：{name}")
+        self.after(1500, lambda: self.status.configure(text=""))
+        self._show_chrome()
+
+    def _show_more(self):
+        """更多功能面板：字幕/音轨/弹幕/画面/OSD/锁屏"""
+        panel = tk.Toplevel(self)
+        panel.title("更多")
+        panel.configure(bg="#101010")
+        try:
+            panel.attributes("-topmost", True)  # 全屏时保持可见
+        except Exception:
+            pass
+        items = [
+            ("字幕", self._sub_menu),
+            ("音轨", self._audio_menu),
+            ("弹幕", self._danmaku_menu),
+            ("画面比例", self._cycle_scale),
+            ("显示信息 (i)", self._toggle_osd),
+            ("锁屏 (L)", self._toggle_lock),
+            ("关闭", panel.destroy),
+        ]
+        for i, (text, cb) in enumerate(items):
+            FocusLabel(panel, text=text, bg="#1E1E1E", fg=FG, font=tv_font(11),
+                       on_select=lambda c=cb, p=panel: (p.destroy(), c())
+                       ).grid(row=i // 4, column=i % 4, padx=6, pady=6,
+                              ipadx=10, ipady=2)
+
+    # ---- 字幕（P1） ----
+
+    def _sub_tracks(self):
+        return [t for t in (self.player.track_list("sub") if self.player else [])
+                if t.get("id") is not None]
+
+    def _sub_menu(self):
+        panel = tk.Toplevel(self)
+        panel.title("字幕")
+        panel.configure(bg="#101010")
+        try:
+            panel.attributes("-topmost", True)
+        except Exception:
+            pass
+        row = 0
+        FocusLabel(panel, text="关闭字幕", bg="#1E1E1E", fg=FG, font=tv_font(11),
+                   on_select=lambda p=panel: (p.destroy(), self._sub_off())
+                   ).grid(row=row, column=0, padx=6, pady=4, sticky="w")
+        row += 1
+        for t in self._sub_tracks():
+            label = (t.get("title") or t.get("external-filename")
+                     or f"字幕 {t.get('id')}")
+            label = str(label).split("/")[-1][:28]
+            FocusLabel(panel, text=label, bg="#1E1E1E", fg=FG, font=tv_font(11),
+                       on_select=lambda p=panel, tid=t.get("id"):
+                       (p.destroy(), self._pick_sub(tid))
+                       ).grid(row=row, column=0, padx=6, pady=4, sticky="w")
+            row += 1
+        FocusLabel(panel, text="加载本地字幕…", bg="#1E1E1E", fg=FG,
+                   font=tv_font(11),
+                   on_select=lambda p=panel: (p.destroy(), self._load_sub_file())
+                   ).grid(row=row, column=0, padx=6, pady=4, sticky="w")
+        row += 1
+        FocusLabel(panel, text="字幕延迟 -0.5s", bg="#1E1E1E", fg=FG,
+                   font=tv_font(11),
+                   on_select=lambda: self._sub_delay(-0.5)
+                   ).grid(row=row, column=0, padx=6, pady=4, sticky="w")
+        FocusLabel(panel, text="字幕延迟 +0.5s", bg="#1E1E1E", fg=FG,
+                   font=tv_font(11),
+                   on_select=lambda: self._sub_delay(0.5)
+                   ).grid(row=row, column=1, padx=6, pady=4, sticky="w")
+        row += 1
+        FocusLabel(panel, text="字号 -2", bg="#1E1E1E", fg=FG, font=tv_font(11),
+                   on_select=lambda: self._sub_font(-2)
+                   ).grid(row=row, column=0, padx=6, pady=4, sticky="w")
+        FocusLabel(panel, text="字号 +2", bg="#1E1E1E", fg=FG, font=tv_font(11),
+                   on_select=lambda: self._sub_font(2)
+                   ).grid(row=row, column=1, padx=6, pady=4, sticky="w")
+
+    def _pick_sub(self, track_id):
+        if self.player:
+            self.player.set_track("sub", track_id)
+            self.status.configure(text="已切换字幕")
+            self.after(1500, lambda: self.status.configure(text=""))
+
+    def _sub_off(self):
+        if self.player:
+            self.player.set_track("sub", None)
+            self._sub_path = None
+            self.status.configure(text="字幕已关闭")
+            self.after(1500, lambda: self.status.configure(text=""))
+
+    def _load_sub_file(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self, title="选择字幕文件",
+            filetypes=[("字幕", "*.srt *.ass *.ssa *.vtt *.sub"),
+                       ("全部文件", "*.*")])
+        if not path:
+            return
+        self._sub_path = path
+        if self.player:
+            self.player.add_subtitle(path)
+
+    def _sub_delay(self, delta):
+        if not self.player:
+            return
+        val = round(self.player.get_sub_delay() + delta, 1)
+        self.player.set_sub_delay(val)
+        hawk.put(hawk.SUB_DELAY, val)
+        self.status.configure(text=f"字幕延迟 {val:+.1f}s")
+        self.after(1500, lambda: self.status.configure(text=""))
+
+    def _sub_font(self, delta):
+        if not self.player:
+            return
+        from .player import MpvPlayer as _P
+        cur = int(hawk.get(hawk.SUB_FONT_SIZE, 0) or 0) or 42
+        size = max(18, min(96, cur + delta))
+        hawk.put(hawk.SUB_FONT_SIZE, size)
+        self.player.set_sub_font_size(size)
+        self.status.configure(text=f"字幕字号 {size}")
+        self.after(1500, lambda: self.status.configure(text=""))
+
+    # ---- 音轨（P1） ----
+
+    def _audio_menu(self):
+        if not self.player:
+            return
+        tracks = self.player.track_list("audio")
+        if len(tracks) <= 1:
+            self.status.configure(text="当前视频只有一条音轨")
+            self.after(1500, lambda: self.status.configure(text=""))
+            return
+        panel = tk.Toplevel(self)
+        panel.title("音轨")
+        panel.configure(bg="#101010")
+        try:
+            panel.attributes("-topmost", True)
+        except Exception:
+            pass
+        for i, t in enumerate(tracks):
+            label = t.get("title") or t.get("lang") or f"音轨 {i + 1}"
+            FocusLabel(panel, text=str(label)[:24], bg="#1E1E1E", fg=FG,
+                       font=tv_font(11),
+                       on_select=lambda p=panel, tid=t.get("id"):
+                       (p.destroy(), self._pick_audio(tid))
+                       ).grid(row=i, column=0, padx=6, pady=4, sticky="w")
+
+    def _pick_audio(self, track_id):
+        if self.player:
+            self.player.set_track("audio", track_id)
+            self.status.configure(text="已切换音轨")
+            self.after(1500, lambda: self.status.configure(text=""))
+
+    # ---- 弹幕（P1） ----
+
+    def _danmaku_menu(self):
+        panel = tk.Toplevel(self)
+        panel.title("弹幕")
+        panel.configure(bg="#101010")
+        try:
+            panel.attributes("-topmost", True)
+        except Exception:
+            pass
+        on = bool(hawk.get(hawk.DANMAKU_ENABLE, 0))
+        items = [
+            ("关闭弹幕" if on else "开启弹幕", self._toggle_danmaku),
+            ("加载本地弹幕…", self._load_danmaku_file),
+            ("重新加载", self._reload_danmaku),
+            ("关闭", panel.destroy),
+        ]
+        for i, (text, cb) in enumerate(items):
+            FocusLabel(panel, text=text, bg="#1E1E1E", fg=FG, font=tv_font(11),
+                       on_select=lambda c=cb, p=panel: (p.destroy(), c())
+                       ).grid(row=i // 2, column=i % 2, padx=6, pady=4,
+                              ipadx=8, ipady=1)
+
+    def _toggle_danmaku(self):
+        on = not bool(hawk.get(hawk.DANMAKU_ENABLE, 0))
+        hawk.put(hawk.DANMAKU_ENABLE, 1 if on else 0)
+        if on:
+            self._reload_danmaku()
+        else:
+            self._remove_danmaku()
+        self.status.configure(text="弹幕已开启" if on else "弹幕已关闭")
+        self.after(1500, lambda: self.status.configure(text=""))
+
+    def _load_danmaku_file(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self, title="选择弹幕文件",
+            filetypes=[("弹幕", "*.xml *.json *.txt"), ("全部文件", "*.*")])
+        if not path:
+            return
+        hawk.put(hawk.DANMAKU_FILE, path)
+        hawk.put(hawk.DANMAKU_ENABLE, 1)
+        self._apply_danmaku_file(path)
+
+    def _reload_danmaku(self):
+        """按设置里的本地文件或接口模板拉取弹幕并合成 ASS"""
+        path = str(hawk.get(hawk.DANMAKU_FILE, "") or "")
+        if path and os.path.isfile(path):
+            self._apply_danmaku_file(path)
+            return
+        template = str(hawk.get(hawk.DANMAKU_API, "") or "").strip()
+        if not template:
+            self.status.configure(text="未配置弹幕接口（设置→弹幕接口）")
+            self.after(2000, lambda: self.status.configure(text=""))
+            return
+        ep_name = (self.series[0][1][self.ep_index]
+                   if self.series and self.ep_index < len(self.series[0][1]) else "")
+        url = (template.replace("{name}", urllib.parse.quote(self.vod_name))
+               .replace("{ep}", urllib.parse.quote(ep_name)))
+        self.status.configure(text="正在加载弹幕...")
+        tag = self._dm_ep = f"{self.vod_name}|{ep_name}|{url}"
+
+        def work():
+            from .apiconfig import fetch_text
+            try:
+                text = fetch_text(url, timeout=8, retries=1)
+            except Exception:
+                text = ""
+            ui_thread.run(lambda: self._on_danmaku_text(text, tag))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_danmaku_text(self, text, tag):
+        if tag != self._dm_ep:
+            return  # 已切集/换了弹幕源
+        if not text:
+            self.status.configure(text="未获取到弹幕")
+            self.after(1500, lambda: self.status.configure(text=""))
+            return
+        try:
+            path = _write_danmaku_ass(text)
+        except Exception:
+            path = ""
+        if path:
+            self._apply_danmaku_file(path)
+            self.status.configure(text="弹幕已加载")
+            self.after(1500, lambda: self.status.configure(text=""))
+        else:
+            self.status.configure(text="弹幕解析为空")
+            self.after(1500, lambda: self.status.configure(text=""))
+
+    def _apply_danmaku_file(self, path):
+        try:
+            with open(path, encoding="utf-8-sig", errors="ignore") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        ass = ""
+        if path.lower().endswith(".ass"):
+            ass = text
+        elif text:
+            from . import danmaku
+            ass = danmaku.build_from_text(text)
+        if not ass:
+            self.status.configure(text="弹幕解析为空")
+            self.after(1500, lambda: self.status.configure(text=""))
+            return
+        out = _write_text(_danmaku_ass_path(), ass)
+        if not out:
+            return
+        if self._dm_path:          # 重复加载时先摘掉旧轨，避免叠加
+            self._remove_danmaku()
+        self._dm_path = out
+        if self.player:
+            self.player.add_subtitle(out)
+
+    def _remove_danmaku(self):
+        if self.player and self._dm_path:
+            for t in self.player.track_list("sub"):
+                if str(t.get("external-filename") or "") == self._dm_path:
+                    self.player.remove_subtitle(t.get("id"))
+                    break
+        self._dm_path = None
+
+    def _restore_ext_subs(self):
+        """换集后重新挂上本地字幕与弹幕（loadfile 会清空外挂轨道）"""
+        if not self.player:
+            return
+        if self._sub_path and os.path.isfile(self._sub_path):
+            self.player.add_subtitle(self._sub_path, select=not self._dm_path)
+        if self._dm_path and os.path.isfile(self._dm_path):
+            self.player.add_subtitle(self._dm_path)
+        if bool(hawk.get(hawk.DANMAKU_ENABLE, 0)) and not self._dm_path:
+            self._reload_danmaku()
 
     # ---- 播放控制（对应原版 play_label / play_next / play_pre / seekBar） ----
 
@@ -388,13 +842,32 @@ class Page(tk.Frame):
         self.player.set_volume(vol)
         self.vol_lbl.configure(text=f"🔊 {vol}")
 
+    def _initial_speed(self):
+        """初始倍速：记住倍速开启时沿用本片上次倍速，否则用设置里的默认值"""
+        try:
+            if not bool(hawk.get(hawk.SPEED_MEMORY, 0)):
+                return 1.0
+            rec = store.get_record(self.source_key, self.vod_id) or {}
+            sp = (rec.get("data_json") or {}).get("speed")
+            sp = float(sp or hawk.get(hawk.PLAY_SPEED, 1.0) or 1.0)
+            return sp if 0.25 <= sp <= 4.0 else 1.0
+        except (TypeError, ValueError):
+            return 1.0
+
     def _cycle_speed(self):
-        """倍速循环（对应 resetSpeed 面板）"""
-        i = self._speeds.index(self._speed) if self._speed in self._speeds else 0
+        """倍速循环（对应 resetSpeed 面板）；记住倍速时写回设置"""
+        i = (self._speeds.index(self._speed) if self._speed in self._speeds
+             else self._speeds.index(1.0))
         self._speed = self._speeds[(i + 1) % len(self._speeds)]
-        self.speed_btn.configure(text=f"倍速 {self._speed}x")
+        self.speed_btn.configure(text=f"倍速 {self._speed:g}x")
         if self.player:
             self.player.set_speed(self._speed)
+        if bool(hawk.get(hawk.SPEED_MEMORY, 0)):
+            try:
+                hawk.put(hawk.PLAY_SPEED, self._speed)
+            except Exception:
+                pass
+        self._show_chrome()
 
     def _ensure_player(self):
         if self.player:
@@ -424,8 +897,23 @@ class Page(tk.Frame):
         except OSError as e:
             self.status.configure(text=f"播放器初始化失败：{e}")
             return
+        # 播放期间阻止系统休眠（设置项开启时）
+        try:
+            if bool(hawk.get(hawk.KEEP_AWAKE, 0)):
+                from .host import keep_awake
+                keep_awake(True)
+        except Exception:
+            pass
         self._seq += 1
         self._load(play_url, self._seq)
+
+    @staticmethod
+    def _release_awake():
+        try:
+            from .host import keep_awake
+            keep_awake(False)
+        except Exception:
+            pass
 
     def _load(self, url, seq, status="正在获取播放信息..."):
         """解析 + 播放一次（解析含网络请求，放后台线程，避免 UI 卡「没反应」）"""
@@ -454,9 +942,16 @@ class Page(tk.Frame):
         self._started = False
         self._arm_watchdog(seq)
         self.player.apply_codec(self.player.mpv)
-        self.player.apply_scale(self.player.mpv)
+        w = max(1, self.video.winfo_width())
+        h = max(1, self.video.winfo_height())
+        self.player.apply_scale(self.player.mpv, self._scale, (w, h))
+        self.player.apply_subtitle_style(self.player.mpv)
+        self.player.apply_cache(self.player.mpv)
         self.player.play(real, hdr)
         self.player.set_speed(self._speed)
+        # 换集后重新挂接本地字幕/弹幕（loadfile 会清空外挂轨道）
+        self.after(1200, lambda s=seq: self._restore_ext_subs()
+                   if s == self._seq else None)
         # 恢复进度（对应 Java getSavedProgress：按 progressKey=MD5(url) 精确 seek）
         prog = store.get_progress(real)
         if prog and prog.get("pos") and prog["pos"] > 5:
@@ -553,13 +1048,42 @@ class Page(tk.Frame):
         except Exception:
             pass
         names, urls = self.series[0][1], self.series[1]
-        cols = 6
-        for i, (n, u) in enumerate(zip(names, urls)):
-            FocusLabel(panel, text=n[:14],
-                       bg="#1E1E1E" if i != self.ep_index else "#FF5722",
-                       fg=FG, font=tv_font(11),
-                       on_select=lambda uu=u, ii=i, p=panel: (p.destroy(), self._switch_ep(ii, uu))
-                       ).grid(row=i // cols, column=i % cols, padx=5, pady=5)
+        total = min(len(names), len(urls))
+        pages = max(1, (total + EPS_PER_PAGE - 1) // EPS_PER_PAGE)
+        cols = 8
+        state = {"page": min(self.ep_index // EPS_PER_PAGE, pages - 1)}
+
+        grid = tk.Frame(panel, bg="#101010")
+        grid.pack(padx=10, pady=(10, 4))
+        nav = tk.Frame(panel, bg="#101010")
+        nav.pack(padx=10, pady=(0, 10))
+        page_lbl = tk.Label(nav, text="", bg="#101010", fg=FG_DIM,
+                            font=tv_font(11), width=12)
+
+        def render():
+            for w in grid.winfo_children():
+                w.destroy()
+            start = state["page"] * EPS_PER_PAGE
+            end = min(total, start + EPS_PER_PAGE)
+            for k, i in enumerate(range(start, end)):
+                FocusLabel(grid, text=names[i][:14],
+                           bg="#FF5722" if i == self.ep_index else "#1E1E1E",
+                           fg=FG, font=tv_font(11),
+                           on_select=lambda uu=urls[i], ii=i, p=panel:
+                           (p.destroy(), self._switch_ep(ii, uu))
+                           ).grid(row=k // cols, column=k % cols, padx=5, pady=5)
+            page_lbl.configure(text=f"{state['page'] + 1} / {pages} 页")
+
+        def flip(delta):
+            state["page"] = max(0, min(pages - 1, state["page"] + delta))
+            render()
+
+        FocusLabel(nav, text="上一页", bg="#1E1E1E", fg=FG, font=tv_font(11),
+                   on_select=lambda: flip(-1)).pack(side="left", padx=5)
+        page_lbl.pack(side="left", padx=5)
+        FocusLabel(nav, text="下一页", bg="#1E1E1E", fg=FG, font=tv_font(11),
+                   on_select=lambda: flip(1)).pack(side="left", padx=5)
+        render()
 
     def _switch_ep(self, idx, url):
         # 切集前保存当前集进度（对应 Java 切集时 saveProgress）
@@ -568,6 +1092,8 @@ class Page(tk.Frame):
             if pos > 0:
                 store.save_progress(self._last_real, pos, dur or 0)
         self.ep_index = idx
+        self._dm_path = None      # 弹幕按集生成，换集后重新获取
+        self._dm_ep = None
         self._failover.reset()  # 用户主动换集：重新给所有线路机会
         self._update_info()
         self._seq += 1
@@ -637,6 +1163,8 @@ class Page(tk.Frame):
         counts = [len(u) for u in self.all_urls]
         action, target = self._failover.next_action(
             self.line_index, self.ep_index, counts)
+        if action == "switch" and not bool(hawk.get(hawk.AUTO_SWITCH_LINE, 1)):
+            action, target = "give_up", None  # 设置里关了自动换线
         if action == "retry":
             self.status.configure(
                 text=f"播放失败，正在重试…（{_short_reason(reason)}）")
@@ -713,6 +1241,9 @@ class Page(tk.Frame):
         避免 mpv 同步命令/数据库写在 UI 线程阻塞导致「点了没反应」"""
         from .paths import log_error
         import threading
+        if self._locked:      # 锁屏时先解锁，避免「一键退出」
+            self._toggle_lock()
+            return
 
         for seq, fid in getattr(self, "_app_binds", []):
             try:
@@ -723,7 +1254,8 @@ class Page(tk.Frame):
 
         # 1) 停掉定时任务（必须在切页前，否则回调打到已销毁的控件）
         for job in (self._pos_job, self._seek_job, self._save_job,
-                    self._hide_job, self._watchdog, self._resolve_job):
+                    self._hide_job, self._watchdog, self._resolve_job,
+                    self._osd_job):
             if job:
                 try:
                     self.after_cancel(job)
@@ -732,6 +1264,8 @@ class Page(tk.Frame):
         self._pos_job = self._seek_job = self._save_job = self._hide_job = None
         self._watchdog = None
         self._resolve_job = None
+        self._osd_job = None
+        self._release_awake()
 
         # 恢复进入播放页前的窗口状态（退出全屏沉浸）
         try:

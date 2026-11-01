@@ -43,6 +43,54 @@ def read_live_source(url):
 
 _LIVE_PREFIXES = ("http://", "https://", "rtmp://", "rtp://", "udp://")
 
+# m3u 里的加密分组：group-title → group-password（对应原版加密分组）
+GROUP_PASSWORD = {}
+# 频道级附加信息：(group, name) → {"catchup", "catchup_source", "tvg_id"}
+CHANNEL_META = {}
+
+
+def _extinf_attrs(line):
+    """解析 #EXTINF 行的属性（只取逗号前部分）"""
+    head = line.split(",", 1)[0] if "," in line else line
+    attrs = {}
+    for m in re.finditer(r'([A-Za-z][\w-]*)\s*=\s*"([^"]*)"', head):
+        attrs[m.group(1).lower()] = m.group(2)
+    return attrs
+
+
+def _split_url_headers(url):
+    """`http://x/y.m3u8|User-Agent=..&Referer=..` → (地址, header dict)"""
+    u = str(url or "").strip()
+    if "|" not in u:
+        return u, None
+    base, tail = u.split("|", 1)
+    if "=" not in tail:
+        return u, None
+    hdr = {}
+    for part in re.split(r"[&|]", tail):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        key = k.strip()
+        low = key.lower()
+        if low in ("user-agent", "ua"):
+            hdr["User-Agent"] = v
+        elif low in ("referer", "referrer"):
+            hdr["Referer"] = v
+        elif low == "cookie":
+            hdr["Cookie"] = v
+        elif key:
+            hdr[key] = v
+    return base.strip(), (hdr or None)
+
+
+def _merge_headers(*dicts):
+    out = {}
+    for d in dicts:
+        if d:
+            out.update(d)
+    return out or None
+
 
 def _live_entry_type(l):
     """lives[] 条目的类型（对应 ApiConfig.loadLiveApi 的 type 默认值判断）
@@ -79,9 +127,19 @@ def _channels_from_json(arr):
             hdr = c.get("header") if isinstance(c.get("header"), dict) else None
             srcs = []
             for u in urls:
-                u = str(u or "").strip()
+                u, uhdr = _split_url_headers(u)
                 if u.startswith(_LIVE_PREFIXES):
-                    srcs.append((u, f"线路{len(srcs) + 1}", hdr))
+                    srcs.append((u, f"线路{len(srcs) + 1}",
+                                 _merge_headers(hdr, uhdr)))
+            meta = {}
+            for a, k in (("catchup", "catchup"),
+                         ("catchup_source", "catchup_source"),
+                         ("catchup-source", "catchup_source"),
+                         ("tvg_id", "tvg_id")):
+                if c.get(a):
+                    meta[k] = str(c[a])
+            if meta:
+                CHANNEL_META[(gname, name)] = meta
             if srcs:
                 out.append((gname, name, srcs))
     return out
@@ -211,22 +269,51 @@ def _parse_live_text(text):
             return _channels_from_json(arr)
     lines = text.splitlines()
     if any(l.startswith("#EXTINF") for l in lines):  # m3u
-        import re
-        for l in lines:
-            l = l.strip()
+        pending_hdr = {}
+        for raw in lines:
+            l = raw.strip()
+            if not l:
+                continue
             if l.startswith("#EXTINF"):
+                attrs = _extinf_attrs(l)
                 name = l.split(",")[-1].strip()
-                group = "直播"
-                m = re.search(r'tvg-group="([^"]*)"', l)
-                if m and m.group(1):
-                    group = m.group(1)
-                elif "cctv" in name.lower() or "央视" in name:
-                    group = "央视"
-                elif "卫视" in name:
-                    group = "卫视"
+                group = (attrs.get("group-title") or attrs.get("tvg-group")
+                         or "直播")
+                if group == "直播":
+                    if "cctv" in name.lower() or "央视" in name:
+                        group = "央视"
+                    elif "卫视" in name:
+                        group = "卫视"
+                pwd = attrs.get("group-password") or attrs.get("password")
+                if pwd:
+                    GROUP_PASSWORD[group] = pwd
+                meta = {}
+                for a, k in (("catchup", "catchup"),
+                             ("catchup-source", "catchup_source"),
+                             ("tvg-id", "tvg_id")):
+                    if attrs.get(a):
+                        meta[k] = attrs[a]
+                if meta:
+                    CHANNEL_META[(group, name)] = meta
+                pending_hdr = {}
                 channels.append([group, name, []])
-            elif l and not l.startswith("#") and channels and not channels[-1][2]:
-                channels[-1][2].append((l, "线路1"))
+            elif l.startswith("#EXTVLCOPT:") and channels:
+                # 单频道请求头：#EXTVLCOPT:http-user-agent=xxx
+                opt = l[len("#EXTVLCOPT:"):].strip()
+                if "=" in opt:
+                    k, v = opt.split("=", 1)
+                    k = k.strip().lower()
+                    if "user-agent" in k or k == "ua":
+                        pending_hdr["User-Agent"] = v.strip()
+                    elif "referer" in k:
+                        pending_hdr["Referer"] = v.strip()
+                    elif "cookie" in k:
+                        pending_hdr["Cookie"] = v.strip()
+            elif not l.startswith("#") and channels and not channels[-1][2]:
+                u, hdr = _split_url_headers(l)
+                hdr = _merge_headers(pending_hdr, hdr)
+                channels[-1][2].append((u, "线路1", hdr) if hdr
+                                       else (u, "线路1"))
     else:  # txt: 分组,#genre# / 频道名,url1$源1#url2$源2（或逗号分隔多地址）
         group = "直播"
         for l in lines:
@@ -246,18 +333,24 @@ def _parse_live_text(text):
                         continue
                     if "$" in u:
                         u, src = u.split("$", 1)
-                        srcs.append((u.strip(), src.strip() or "线路"))
+                        u, src = u.strip(), src.strip() or "线路"
                     else:
-                        srcs.append((u, f"线路{len(srcs) + 1}"))
+                        src = f"线路{len(srcs) + 1}"
+                    u, hdr = _split_url_headers(u)
+                    srcs.append((u, src, hdr) if hdr else (u, src))
                 if srcs:
                     channels.append([group, name.strip(), srcs])
     # 保留 http/rtmp/rtp/udp（对应 Java IJK 支持的协议）
     out = []
     for g, n, srcs in channels:
-        srcs = [(u, s) for u, s in srcs if u and (u.startswith(("http://", "https://",
-                "rtmp://", "rtp://", "udp://")))]
-        if srcs:
-            out.append((g, n, srcs))
+        clean = []
+        for item in srcs:
+            u, s = item[0], item[1]
+            if not u or not u.startswith(_LIVE_PREFIXES):
+                continue
+            clean.append(item)
+        if clean:
+            out.append((g, n, clean))
     return out
 
 class Page(tk.Frame):
@@ -275,6 +368,7 @@ class Page(tk.Frame):
     GROUP_W = 176      # 一级：分组列宽
     CH_W = 300         # 二级：频道列宽
     HIDE_MS = 5000     # 列表空闲自动隐藏
+    LIVE_TIMEOUT_MS = 15000  # 起播看门狗：超时自动换线路
 
     def __init__(self, master, app):
         super().__init__(master, bg="#000000")
@@ -296,6 +390,12 @@ class Page(tk.Frame):
         self._epg_job = None
         self._epg_progs = []
         self._visible = True
+        self._reverse = bool(hawk.get(hawk.LIVE_REVERSE, 0))
+        self._live_fails = 0
+        self._live_job = None
+        self._watchdog = None
+        self._pending_ch = None
+        self._modal = False      # 密码输入框打开时屏蔽全局快捷键
 
         # 全屏沉浸（对应 LivePlayActivity 全屏）
         self._was_full = False
@@ -373,6 +473,10 @@ class Page(tk.Frame):
         self.clock = tk.Label(top, text="", bg=CHROME_BG, fg=FG_DIM,
                               font=tv_font(11))
         self.clock.pack(side="right", padx=14)
+        # 实时网速（缓冲速率，部分平台拿不到时不显示）
+        self.netspeed = tk.Label(top, text="", bg=CHROME_BG, fg="#8FD18F",
+                                 font=tv_font(11))
+        self.netspeed.pack(side="right", padx=(0, 16))
 
     def _bottom_widgets(self, b):
         """底部悬浮控制栏：上一行节目单（对应 ll_epg：台号+台名+当前/下一节目），
@@ -406,6 +510,8 @@ class Page(tk.Frame):
         self._bar_btn(row, "⏮ 上一台", lambda: self._step_channel(-1))
         self._bar_btn(row, "⏭ 下一台", lambda: self._step_channel(1))
         self._bar_btn(row, "⇄ 换源", self._switch_source)
+        self._bar_btn(row, "📺 节目单", self._show_epg_panel)
+        self._bar_btn(row, "⇅ 倒序", self._toggle_reverse)
         self._bar_btn(row, "☰ 频道列表", self._toggle_list)
         self._bar_btn(row, "⛶ 窗口/全屏", self._toggle_fullscreen)
         self._bar_btn(row, "✕ 退出直播", self._stop_and_back, accent=True)
@@ -455,6 +561,7 @@ class Page(tk.Frame):
         """优先自定义直播源（HawkConfig.LIVE_API_URL），否则用接口配置的 lives"""
         def run():
             name, chs = None, []
+            epg.clear_cache()   # 换源后旧的节目单缓存作废
             custom = str(hawk.get(hawk.LIVE_API_URL, "") or "").strip()
             if custom:
                 try:
@@ -505,7 +612,9 @@ class Page(tk.Frame):
                 relx=0.5, rely=0.5, anchor="center")
             self.status.configure(text="无可用直播源")
             return
-        self.channels = chs
+        self.channels = list(chs)
+        if self._reverse:
+            self.channels.reverse()
         self.groups = []
         for g, n, u in chs:
             if g not in self.groups:
@@ -614,9 +723,68 @@ class Page(tk.Frame):
             b.configure(text=f"{'▶' if self._is_cur(c) else '　'} {body}")
 
     # ------------------------------------------------ 播放 ----
+    def _group_locked(self, group):
+        """加密分组（m3u group-password）：密码未见或未解锁时返回 True"""
+        pwd = GROUP_PASSWORD.get(group)
+        if not pwd:
+            return False
+        unlocked = hawk.get(hawk.LIVE_PASSWORD_GROUPS, []) or []
+        return group not in unlocked
+
+    def _ask_password(self, ch):
+        """输入加密分组密码；正确后记住并继续播放"""
+        g = ch[0]
+        self._pending_ch = ch
+        self._modal = True
+        panel = tk.Toplevel(self)
+        panel.title("加密频道")
+        panel.configure(bg="#101010")
+        try:
+            panel.attributes("-topmost", True)
+        except Exception:
+            pass
+        tk.Label(panel, text=f"「{g}」为加密分组，请输入密码",
+                 bg="#101010", fg=FG, font=tv_font(12)).pack(padx=20, pady=(16, 8))
+        entry = tk.Entry(panel, show="*", font=tv_font(12), width=18,
+                         bg="#1E1E1E", fg=FG, insertbackground=FG)
+        entry.pack(padx=20, pady=6)
+        msg = tk.Label(panel, text="", bg="#101010", fg="#FF8A80",
+                       font=tv_font(10))
+        msg.pack(pady=(0, 6))
+        entry.focus_set()
+
+        def close():
+            self._modal = False
+            self._pending_ch = None
+            panel.destroy()
+
+        def submit(_e=None):
+            if entry.get() == str(GROUP_PASSWORD.get(g, "")):
+                unlocked = list(hawk.get(hawk.LIVE_PASSWORD_GROUPS, []) or [])
+                if g not in unlocked:
+                    unlocked.append(g)
+                    hawk.put(hawk.LIVE_PASSWORD_GROUPS, unlocked)
+                pending = self._pending_ch
+                close()
+                if pending:
+                    self._play(pending)
+            else:
+                msg.configure(text="密码错误")
+                entry.select_range(0, "end")
+
+        panel.protocol("WM_DELETE_WINDOW", close)
+
+        entry.bind("<Return>", submit)
+        FocusLabel(panel, text="确定", bg=ACCENT, fg="#FFFFFF",
+                   font=tv_font(12), on_select=submit, padx=16, pady=4
+                   ).pack(pady=(0, 16))
+
     def _play(self, ch, src_idx=0):
         g, n, srcs = ch
         if not srcs:
+            return
+        if self._group_locked(g):
+            self._ask_password(ch)
             return
         self.cur_ch = ch
         self.cur_group = g
@@ -630,6 +798,16 @@ class Page(tk.Frame):
                 self.player = MpvPlayer(
                     self.video, insets=(self.TOP_H, 0, self.BAR_H, 0))
                 self._raise_chrome()   # mpv 视频窗口会盖住后 place 的面板，必须重置 z 序
+            # 解码/画面/缓存设置与点播页保持一致
+            self.player.apply_codec(self.player.mpv)
+            try:
+                scale = int(hawk.get(hawk.PLAY_SCALE, 0) or 0)
+            except (TypeError, ValueError):
+                scale = 0
+            w = max(1, self.video.winfo_width())
+            h = max(1, self.video.winfo_height())
+            self.player.apply_scale(self.player.mpv, scale, (w, h))
+            self.player.apply_cache(self.player.mpv)
             self.player.play(u, hdr)
         except Exception as e:
             self.status.configure(text=f"播放失败：{e}")
@@ -645,6 +823,10 @@ class Page(tk.Frame):
         self._mark_current()
         self._load_epg(ch)
         self._reset_hide()
+        # 起播看门狗 + 网速轮询（换台视为新一轮）
+        self._live_fails = 0
+        self._arm_watchdog()
+        self._start_live_poll()
 
     # ------------------------------------------------ 节目单 ----
     def _load_epg(self, ch):
@@ -728,6 +910,181 @@ class Page(tk.Frame):
             self._select_group(ch[0])
         self._play(ch)
 
+    # ------------------------------------------------ 起播看门狗 / 网速 ----
+
+    def _arm_watchdog(self):
+        self._cancel_watchdog()
+        self._watchdog = self.after(self.LIVE_TIMEOUT_MS, self._check_watchdog)
+
+    def _cancel_watchdog(self):
+        if self._watchdog:
+            try:
+                self.after_cancel(self._watchdog)
+            except Exception:
+                pass
+        self._watchdog = None
+
+    def _check_watchdog(self):
+        """起播超时：自动尝试下一条线路（对应原版直播换源兜底）"""
+        self._watchdog = None
+        if not self.player or not self.cur_ch:
+            return
+        idle, pause, pos = False, False, 0.0
+        try:
+            idle = bool(self.player.core_idle())
+            pos, _, pause = self.player.status()
+        except Exception:
+            pass
+        if pause or not idle or (pos or 0) > 1.0:
+            return  # 用户暂停或已出画面
+        srcs = self.cur_ch[2]
+        self._live_fails += 1
+        if self._live_fails < max(1, len(srcs)):
+            self.status.configure(text="起播超时，自动切换线路…")
+            self._play(self.cur_ch, (self.cur_src + 1) % len(srcs))
+        else:
+            self.status.configure(text="⚠ 直播源播放失败，按 R 换源或换台")
+            from .paths import log_error
+            log_error("[live] 播放超时", self.cur_ch[1] if self.cur_ch else "")
+
+    def _start_live_poll(self):
+        if self._live_job:
+            try:
+                self.after_cancel(self._live_job)
+            except Exception:
+                pass
+        self._live_job = self.after(2000, self._poll_live)
+
+    def _poll_live(self):
+        """轮询网速并确认起播（出画面后撤销看门狗）"""
+        self._live_job = None
+        if not self.player:
+            return
+        try:
+            spd = self.player.cache_speed()
+        except Exception:
+            spd = 0.0
+        try:
+            if spd > 0:
+                self.netspeed.configure(
+                    text=(f"{spd / 1048576:.1f} MB/s" if spd >= 1048576
+                          else f"{spd / 1024:.0f} KB/s"))
+            else:
+                self.netspeed.configure(text="")
+        except Exception:
+            pass
+        try:
+            if not self.player.core_idle():
+                self._cancel_watchdog()
+        except Exception:
+            pass
+        self._live_job = self.after(2000, self._poll_live)
+
+    # ------------------------------------------------ 倒序 / 节目单回看 ----
+
+    def _toggle_reverse(self):
+        """频道列表倒序（对应原版「频道倒序」）"""
+        self._reverse = not self._reverse
+        hawk.put(hawk.LIVE_REVERSE, 1 if self._reverse else 0)
+        if not self.channels:
+            return
+        self.channels.reverse()
+        self._build_groups()
+        group = self.cur_ch[0] if self.cur_ch else self.groups[0]
+        self._select_group(group)
+        self._mark_current()
+        self.status.configure(text="频道列表已倒序" if self._reverse
+                              else "频道列表已恢复正序")
+        self._show_overlay()
+
+    def _show_epg_panel(self):
+        """节目单侧栏：列出当天节目，当前节目高亮，点击可回看"""
+        if not self._epg_progs:
+            self.status.configure(text="暂无节目单")
+            self.after(2000, self._restore_status)
+            return
+        panel = tk.Toplevel(self)
+        panel.title(f"节目单 · {self.cur_ch[1] if self.cur_ch else ''}")
+        panel.configure(bg="#101010")
+        try:
+            panel.attributes("-topmost", True)
+        except Exception:
+            pass
+        tk.Label(panel, text=f"{self.cur_ch[1] if self.cur_ch else ''} 节目单",
+                 bg="#101010", fg=FG, font=tv_font(13, True)).pack(
+            anchor="w", padx=14, pady=(12, 6))
+        canvas, inner = self._scroll(panel, "#101010")
+        canvas.configure(height=420, width=380)
+        cur, _nxt = epg.current_next(self._epg_progs)
+        for p in self._epg_progs:
+            is_cur = cur is not None and p is cur
+            label = f"{epg.hhmm(p['start'])}-{epg.hhmm(p['stop'])}  {p['title']}"
+            FocusLabel(inner, text=label[:42],
+                       bg=ACCENT if is_cur else "#1E1E1E", fg=FG,
+                       font=tv_font(11), padx=10, pady=5, anchor="w",
+                       on_select=lambda pp=p, po=panel:
+                       (po.destroy(), self._play_catchup(pp))
+                       ).pack(fill="x", padx=6, pady=2)
+
+    def _catchup_url(self, prog):
+        """节目回看地址：节目自带 url 优先，否则套用频道 catchup 模板"""
+        if prog.get("url"):
+            return str(prog["url"])
+        key = (self.cur_ch[0], self.cur_ch[1]) if self.cur_ch else None
+        meta = CHANNEL_META.get(key) or {}
+        src = (prog.get("catchup_source") or prog.get("catchup")
+               or meta.get("catchup_source") or meta.get("catchup") or "")
+        if not src:
+            return ""
+        if "{" not in src:
+            return src
+        from datetime import timezone
+        start, stop = prog.get("start"), prog.get("stop")
+
+        def fmt(dt, pattern):
+            return dt.strftime(pattern) if dt else ""
+
+        def utc(dt):
+            try:
+                return dt.astimezone(timezone.utc)
+            except Exception:
+                return dt
+        mapping = {
+            "start": fmt(start, "%Y%m%d%H%M%S"),
+            "end": fmt(stop, "%Y%m%d%H%M%S"),
+            "utcstart": fmt(utc(start), "%Y%m%d%H%M%S"),
+            "utcend": fmt(utc(stop), "%Y%m%d%H%M%S"),
+            "channel": self.cur_ch[1] if self.cur_ch else "",
+            "name": self.cur_ch[1] if self.cur_ch else "",
+            "tvg-id": str(meta.get("tvg_id") or ""),
+            "date": fmt(start, "%Y%m%d"),
+        }
+        out = str(src)
+        for k, v in mapping.items():
+            out = out.replace("{" + k + "}", v)
+        return out
+
+    def _play_catchup(self, prog):
+        """播放节目回看（对应原版 catchup 回看）"""
+        if not self.player:
+            return
+        url = self._catchup_url(prog)
+        if not url.startswith(("http://", "https://", "rtmp://", "rtp://")):
+            self.status.configure(text="该节目不支持回看")
+            self.after(2000, self._restore_status)
+            return
+        hdr = None
+        if self.cur_ch and self.cur_ch[2]:
+            item = self.cur_ch[2][self.cur_src % len(self.cur_ch[2])]
+            hdr = item[2] if len(item) > 2 else None
+        try:
+            self.player.play(url, hdr)
+        except Exception as e:
+            self.status.configure(text=f"回看失败：{e}")
+            return
+        self.status.configure(text=f"回看：{prog['title']}")
+        self._reset_hide()
+
     # ------------------------------------------------ 键盘 ----
     def _bind_keys(self):
         hotkeys = {
@@ -739,6 +1096,10 @@ class Page(tk.Frame):
             "<Next>": lambda: self._step_channel(1),
             "<Key-r>": self._switch_source,
             "<Key-R>": self._switch_source,
+            "<Key-e>": self._show_epg_panel,
+            "<Key-E>": self._show_epg_panel,
+            "<Key-s>": self._toggle_reverse,
+            "<Key-S>": self._toggle_reverse,
             "<Key-p>": self._toggle_pause,
             "<Key-P>": self._toggle_pause,
             "<Key-f>": self._toggle_fullscreen,
@@ -746,8 +1107,11 @@ class Page(tk.Frame):
         }
         for seq, cb in hotkeys.items():
             try:
-                fid = self.app.bind(seq, lambda e, c=cb: (self._wake(), c(), "break")[2],
-                                    add="+")
+                fid = self.app.bind(
+                    seq,
+                    lambda e, c=cb: ("break" if self._modal else
+                                     (self._wake(), c(), "break")[2]),
+                    add="+")
                 self._app_binds.append((seq, fid))
             except Exception:
                 pass
@@ -755,14 +1119,20 @@ class Page(tk.Frame):
         # _back() 看到列表可见就只收起列表，永远走不到退出分支（旧 bug）。
         for seq in ("<Escape>", "<BackSpace>"):
             try:
-                fid = self.app.bind(seq, lambda e: (self._back(), "break")[1], add="+")
+                fid = self.app.bind(
+                    seq,
+                    lambda e: "break" if self._modal else (self._back(), "break")[1],
+                    add="+")
                 self._app_binds.append((seq, fid))
             except Exception:
                 pass
         for d in "0123456789":
             try:
-                fid = self.app.bind(d, lambda e, k=d: (self._wake(), self._digit(k),
-                                                       "break")[2], add="+")
+                fid = self.app.bind(
+                    d,
+                    lambda e, k=d: "break" if self._modal else
+                    (self._wake(), self._digit(k), "break")[2],
+                    add="+")
                 self._app_binds.append((d, fid))
             except Exception:
                 pass
@@ -981,13 +1351,15 @@ class Page(tk.Frame):
             except Exception:
                 pass
         self._app_binds = []
-        for job in (self._hide_job, self._digit_job, self._clock_job, self._epg_job):
+        for job in (self._hide_job, self._digit_job, self._clock_job, self._epg_job,
+                    self._live_job, self._watchdog):
             if job:
                 try:
                     self.after_cancel(job)
                 except Exception:
                     pass
         self._hide_job = self._digit_job = self._clock_job = self._epg_job = None
+        self._live_job = self._watchdog = None
         try:
             self.app.attributes("-fullscreen", self._was_full)
         except Exception:

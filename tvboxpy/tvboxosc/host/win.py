@@ -32,6 +32,28 @@ def node_candidates():
     ]
 
 
+# ---------------------------------------------------------------- 防休眠
+
+_ES_CONTINUOUS = 0x80000000
+_ES_SYSTEM_REQUIRED = 0x00000001
+_ES_DISPLAY_REQUIRED = 0x00000002
+
+
+def keep_awake(on):
+    """播放期间阻止系统休眠/熄屏（对应原版 FLAG_KEEP_SCREEN_ON）
+
+    SetThreadExecutionState 的作用域是调用线程，因此只能在 Tk 主线程调用。"""
+    try:
+        import ctypes
+        flags = _ES_CONTINUOUS
+        if on:
+            flags |= _ES_SYSTEM_REQUIRED | _ES_DISPLAY_REQUIRED
+        ctypes.windll.kernel32.SetThreadExecutionState(flags)
+        return True
+    except Exception:
+        return False
+
+
 def chrome_insets():
     """mpv 直接嵌进 video 容器，不需要为自绘控制栏留边距"""
     return (0, 0, 0, 0)

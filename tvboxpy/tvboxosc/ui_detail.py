@@ -2,9 +2,12 @@
 import tkinter as tk
 from . import ui_thread
 
-from . import apiconfig, store
+from . import apiconfig, hawk, store
 from . import ui_thread
 from .theme import BG, FG, FG_DIM, ACCENT, FocusLabel, tv_font, grid_key_nav, PANEL, POSTER_BG, FOCUS_BG, FOCUS_FG
+
+# 本会话已自动播放过的详情（避免播放页返回详情后被再次自动起播）
+_AUTO_PLAYED = set()
 
 
 class Page(tk.Frame):
@@ -146,16 +149,35 @@ class Page(tk.Frame):
         FocusLabel(btns, text="🔍 快速搜索", bg="#4A90E2", fg="#FFFFFF",
                    font=tv_font(14, True),
                    on_select=self._quick_search).pack(side="left", padx=(0, 10))
-        FocusLabel(btns, text="☆ 收藏", bg="#E91E63", fg="#FFFFFF",
+        FocusLabel(btns, text="⇄ 换源", bg="#4A90E2", fg="#FFFFFF",
                    font=tv_font(14, True),
-                   on_select=self._collect).pack(side="left", padx=(0, 10))
+                   on_select=self._switch_source).pack(side="left", padx=(0, 10))
+        fav = bool(store.is_collect(self.source_key, self.vod_id))
+        self.collect_btn = FocusLabel(
+            btns, text="★ 已收藏" if fav else "☆ 收藏", bg="#E91E63", fg="#FFFFFF",
+            font=tv_font(14, True), on_select=self._collect)
+        self.collect_btn.pack(side="left", padx=(0, 10))
         FocusLabel(btns, text="⇅ 倒序", bg=PANEL, fg=FG, font=tv_font(14, True),
                    on_select=self._reverse_eps).pack(side="left")
 
-        if info["content"]:
-            tk.Label(self.body, text=info["content"][:300], bg=BG, fg=FG_DIM,
-                     font=tv_font(11), wraplength=1000, justify="left",
-                     anchor="nw").pack(fill="x", pady=(4, 10))
+        self._content_full = info["content"] or ""
+        self._content_open = False
+        if self._content_full:
+            self.content_lbl = tk.Label(
+                self.body, text=self._content_full[:300] +
+                ("…" if len(self._content_full) > 300 else ""),
+                bg=BG, fg=FG_DIM, font=tv_font(11), wraplength=1000,
+                justify="left", anchor="nw")
+            self.content_lbl.pack(fill="x", pady=(4, 0))
+            if len(self._content_full) > 300:
+                self.content_more = FocusLabel(
+                    self.body, text="展开简介 ▾", bg=BG, fg="#5A6B94",
+                    font=tv_font(10), on_select=self._toggle_content)
+                self.content_more.pack(anchor="w", pady=(0, 10))
+            else:
+                self.content_more = None
+        else:
+            self.content_lbl = self.content_more = None
 
         # 线路 flags + 选集
         if info["series_flags"]:
@@ -183,6 +205,8 @@ class Page(tk.Frame):
             FocusLabel(self.body, text="🔍 搜索其他源播放", bg=FOCUS_BG, fg=FOCUS_FG,
                        font=tv_font(14, True),
                        on_select=self._quick_search).pack(anchor="w")
+        # 设置开启「详情页自动播放第一集」时直接起播（有历史进度则不打扰）
+        self.after(200, self._auto_play_if_enabled)
 
     def _load_poster(self, poster, pic):
         """详情页海报（复用 imgcache，含 @Referer/@User-Agent 解析）"""
@@ -357,9 +381,113 @@ class Page(tk.Frame):
                         line_index=self.cur_flag)
 
     def _collect(self):
-        on = store.save_collect(self.source_key, self.vod_id, self.info["name"],
-                                self.info["pic"])
+        name = self.info.get("name") or self.vod_name
+        on = store.save_collect(self.source_key, self.vod_id, name,
+                                self.info.get("pic") or "")
+        try:
+            self.collect_btn.configure(text="★ 已收藏" if on else "☆ 收藏")
+        except (AttributeError, tk.TclError):
+            pass
         self.app.title("TVBox" + ("（已收藏）" if on else "（已取消收藏）"))
+
+    def _toggle_content(self):
+        """简介展开/收起"""
+        if not self._content_full:
+            return
+        self._content_open = not self._content_open
+        text = (self._content_full if self._content_open
+                else self._content_full[:300] + "…")
+        try:
+            self.content_lbl.configure(text=text)
+            self.content_more.configure(
+                text="收起简介 ▴" if self._content_open else "展开简介 ▾")
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _switch_source(self):
+        """换源：在其他站点里搜同名影片，选中就以同一详情页位置切换"""
+        name = (self.info.get("name") or self.vod_name or "").strip()
+        if not name:
+            return
+        bean = self.bean
+        panel = tk.Toplevel(self)
+        panel.title("换源")
+        panel.configure(bg="#101010")
+        try:
+            panel.attributes("-topmost", True)
+        except Exception:
+            pass
+        tk.Label(panel, text=f"正在其他站点搜索「{name}」…", bg="#101010",
+                 fg=FG, font=tv_font(11)).pack(padx=16, pady=10)
+        body = tk.Frame(panel, bg="#101010")
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        state = {"seq": 0}
+
+        def close():
+            state["seq"] += 1
+            panel.destroy()
+
+        panel.protocol("WM_DELETE_WINDOW", close)
+
+        def run():
+            from . import data_api
+            found = []
+            for b in apiconfig.api_config.source_bean_list:
+                if bean is not None and b.key == bean.key:
+                    continue
+                try:
+                    vods = data_api.search_vods(b, name)
+                except Exception:
+                    continue
+                exact = [v for v in vods
+                         if name in v[1] or v[1] in name]
+                if exact:
+                    found.append((b, exact[0]))
+            ui_thread.run(lambda: show(found))
+
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+        def show(found):
+            if not panel.winfo_exists():
+                return
+            for w in body.winfo_children():
+                w.destroy()
+            if not found:
+                tk.Label(body, text="其他站点没有找到该影片", bg="#101010",
+                         fg=FG_DIM, font=tv_font(11)).pack(padx=16, pady=10)
+                return
+            for b, vod in found:
+                FocusLabel(
+                    body, text=f"{b.name or b.key} · {str(vod[1])[:24]}",
+                    bg="#1E1E1E", fg=FG, font=tv_font(11), padx=10, pady=5,
+                    anchor="w",
+                    on_select=lambda bb=b, vv=vod, p=panel:
+                    self._jump_source(p, bb, vv)
+                ).pack(fill="x", padx=4, pady=2)
+
+    def _jump_source(self, panel, bean, vod):
+        panel.destroy()
+        self.app.switch(type(self), source_key=bean.key, vod_id=str(vod[0]),
+                        vod_name=str(vod[1]))
+
+    def _auto_play_if_enabled(self):
+        """设置里开启「详情页自动播放第一集」时直接起播"""
+        try:
+            if not bool(hawk.get(hawk.AUTO_PLAY, 0)):
+                return
+        except Exception:
+            return
+        key = (self.source_key, str(self.vod_id))
+        if key in _AUTO_PLAYED or self._resume:
+            return  # 有续播进度时交给用户点「续播」
+        if not self.info.get("series_urls"):
+            return
+        urls = self.info["series_urls"][0]
+        if not urls:
+            return
+        _AUTO_PLAYED.add(key)
+        self._play(0, urls[0])
 
     def _reverse_eps(self):
         """倒序选集（对应 Java tvSort / VodInfo.reverse）"""

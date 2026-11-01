@@ -137,47 +137,100 @@ def _parse_xmltv_regex(text, names):
     return out
 
 
+_PROG_KEYS = ("epg", "epg_data", "programs", "programmes", "data", "list")
+
+
+def _program(it, base=None):
+    """单条 JSON 节目 → 标准 dict；标题/开始时间缺失返回 None"""
+    if not isinstance(it, dict):
+        return None
+    title = str(it.get("title") or it.get("name") or "").strip()
+    start = (it.get("start") or it.get("start_time") or it.get("st")
+             or it.get("starttime") or "")
+    stop = (it.get("end") or it.get("stop") or it.get("end_time")
+            or it.get("et") or "")
+    s = _parse_time(start) or _parse_hhmm(start, base)
+    e = _parse_time(stop) or _parse_hhmm(stop, base)
+    if not (title and s):
+        return None
+    prog = {"start": s, "stop": e or s, "title": title}
+    # 回看地址（部分节目单逐条给出），供直播页「回看」使用
+    catch = (it.get("url") or it.get("catchup") or it.get("catchup_url")
+             or it.get("link") or "")
+    if catch:
+        prog["url"] = str(catch)
+    if it.get("catchup_source"):
+        prog["catchup_source"] = str(it["catchup_source"])
+    return prog
+
+
+def _unwrap_channels(data, names):
+    """多频道 JSON（[{channel_name, epg_data:[...]}, ...]）→ 命中频道的节目数组"""
+    want = {normalize(n) for n in names if n}
+    picked, fallback = [], []
+    for ch in data:
+        if not isinstance(ch, dict):
+            continue
+        arr = None
+        for k in _PROG_KEYS:
+            if isinstance(ch.get(k), list):
+                arr = ch[k]
+                break
+        if not arr:
+            continue
+        cname = normalize(ch.get("channel_name") or ch.get("channel")
+                          or ch.get("name") or "")
+        if not want or (cname and (cname in want or any(
+                w in cname or cname in w for w in want))):
+            picked.extend(arr)
+        else:
+            fallback.append(arr)
+    return picked if picked else (fallback[0] if len(fallback) == 1 else [])
+
+
 def parse_json(text, names):
-    """解析 JSON 节目单（51zmt 的 json 变体 / 自定义接口）"""
-    out = []
+    """解析 JSON 节目单（51zmt 的 json 变体 / 自定义接口）
+
+    兼容三种结构：单频道 {"epg_data":[...]}、多频道
+    [{"channel_name":"CCTV1","epg_data":[...]}]、纯节目数组。
+    """
     try:
         data = json.loads(text)
     except Exception:
-        return out
+        return []
     arr = None
     if isinstance(data, list):
-        arr = data
+        if data and isinstance(data[0], dict) and any(
+                isinstance(data[0].get(k), list) for k in _PROG_KEYS):
+            arr = _unwrap_channels(data, names)
+        else:
+            arr = data
     elif isinstance(data, dict):
-        for k in ("epg", "programs", "programmes", "data", "list"):
+        for k in _PROG_KEYS:
             if isinstance(data.get(k), list):
                 arr = data[k]
                 break
     if not arr:
-        return out
+        return []
+    out = []
     for it in arr:
-        if not isinstance(it, dict):
-            continue
-        title = str(it.get("title") or it.get("name") or "").strip()
-        start = (it.get("start") or it.get("start_time") or it.get("st")
-                 or it.get("starttime") or "")
-        stop = (it.get("end") or it.get("stop") or it.get("end_time")
-                or it.get("et") or "")
-        s = _parse_time(start) or _parse_hhmm(start)
-        e = _parse_time(stop) or _parse_hhmm(stop)
-        if title and s:
-            out.append({"start": s, "stop": e or s, "title": title})
+        prog = _program(it)
+        if prog:
+            out.append(prog)
+    # 先按原始顺序补齐跨零点（接口一般按播出顺序给出），再排序
+    _fix_rollover(out)
     out.sort(key=lambda x: x["start"])
     return out
 
 
-def _parse_hhmm(s):
-    """只有 HH:MM 的节目单，按今天补全"""
-    m = re.match(r"^(\d{1,2}):(\d{2})$", str(s or "").strip())
+def _parse_hhmm(s, base=None):
+    """只有 HH:MM[:SS] 的节目单，按 base（默认今天）补全日期"""
+    m = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", str(s or "").strip())
     if not m:
         return None
-    now = datetime.now()
-    return now.replace(hour=int(m.group(1)), minute=int(m.group(2)),
-                       second=0, microsecond=0)
+    day = base or datetime.now()
+    return day.replace(hour=int(m.group(1)), minute=int(m.group(2)),
+                       second=int(m.group(3) or 0), microsecond=0)
 
 
 def parse(text, names):
@@ -191,6 +244,18 @@ def parse(text, names):
         return parse_json(text, names)
     # 头部判断不出就两路都试
     return parse_json(text, names) or parse_xmltv(text, names)
+
+
+def _fix_rollover(progs):
+    """只有时分秒的节目单跨零点后需顺延一天（否则 00:30 会排到 23:00 前）"""
+    prev = None
+    for p in progs:
+        if prev is not None and p["start"] + timedelta(hours=1) < prev:
+            shift = timedelta(days=1)
+            p["start"] += shift
+            p["stop"] += shift
+        prev = p["start"]
+    return progs
 
 
 # ---------------------------------------------------------------- 加载 ----

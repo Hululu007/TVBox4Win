@@ -54,6 +54,35 @@ def chrome_insets():
     return (42, 0, 96, 0)
 
 
+# ---------------------------------------------------------------- 防休眠
+
+_caffeinate = None
+
+
+def keep_awake(on):
+    """播放期间保持唤醒：用系统自带 caffeinate -dims 子进程（退出时回收）"""
+    global _caffeinate
+    import subprocess
+    if on:
+        if _caffeinate is not None and _caffeinate.poll() is None:
+            return True
+        try:
+            _caffeinate = subprocess.Popen(
+                ["caffeinate", "-dims"], stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL)
+            return True
+        except OSError:
+            _caffeinate = None
+            return False
+    if _caffeinate is not None:
+        try:
+            _caffeinate.terminate()
+        except OSError:
+            pass
+        _caffeinate = None
+    return True
+
+
 # ---------------------------------------------------------------- 播放后端
 
 _shared = None

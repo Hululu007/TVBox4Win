@@ -645,6 +645,14 @@ class PySpider:
             raise RuntimeError("py 爬虫未实现 liveContent")
         return fn(str(url or ""))
 
+    def action(self, action):
+        """执行爬虫 action（列表项 vod_tag == "action" 时调用）"""
+        self._ensure()
+        fn = getattr(self._impl, "action", None)
+        if not callable(fn):
+            raise RuntimeError("py 爬虫未实现 action")
+        return fn(str(action))
+
     def local_proxy(self, param):
         """调用爬虫的 localProxy（原版通过 /proxy?do=py 回传）"""
         self._ensure()

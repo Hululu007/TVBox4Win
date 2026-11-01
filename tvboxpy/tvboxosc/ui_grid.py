@@ -1,6 +1,7 @@
 """点播页 GridFragment 复刻（首页+点播合并页）：源名+日期 / 主页tab+分类tab /
 功能按钮排 / 内容区（主页 tab=豆瓣热播海报，分类 tab=影片网格）"""
 import datetime
+import os
 import tkinter as tk
 from . import ui_thread, imgcache
 
@@ -74,6 +75,17 @@ class Page(tk.Frame):
         # 切换已加载源（对应原版首页站点切换）
         FocusLabel(top, text="▾ 切换源", bg=PANEL, fg=FG, font=tv_font(12),
                    on_select=self._show_sources).pack(side="right", padx=16)
+        FocusLabel(top, text="⟳ 刷新", bg=PANEL, fg=FG, font=tv_font(12),
+                   on_select=self._refresh).pack(side="right", padx=(0, 6))
+        self._folder_stack = []
+        self._folder_title = ""
+        # F5 刷新（绑顶层窗口，网格里焦点在按钮上也能收到）
+        try:
+            fid = self.app.bind("<F5>", lambda e: (self._refresh(), "break")[1],
+                                add="+")
+            self._app_binds = [("<F5>", fid)]
+        except Exception:
+            self._app_binds = []
         self.tabs_bar = tk.Frame(self, bg=BG)
         self.tabs_bar.pack(fill="x", padx=16, pady=4)
         # 筛选入口（有筛选器的分类才显示，对应 showFilter 按钮）
@@ -336,6 +348,13 @@ class Page(tk.Frame):
         self.page_index = 1
         self.vods = []
         self.filter_sel = {}   # 筛选条件 {key: value}（切分类重置）
+        # 从任一分类 tab 进入都算退出文件夹树
+        self._folder_stack = []
+        self._folder_title = ""
+        try:
+            self.status_filter.configure(text="")
+        except tk.TclError:
+            pass
         # 有筛选器的分类显示筛选按钮（只读缓存，筛选器已在后台预取）
         key = f"{self.bean.key}:{self.bean.api}"
         cached = data_api._filters_cache.get(key, {})
@@ -470,6 +489,16 @@ class Page(tk.Frame):
     def _retry(self):
         self._load_classes()
 
+    def _refresh(self):
+        """刷新当前内容（F5 / 顶栏按钮）"""
+        self._load_classes()
+        if self.cur_class is None:
+            self._reload_grid()
+        else:
+            self.page_index = 1
+            self.vods = []
+            self._reload_grid()
+
     def _show_grid_error(self, msg="内容加载失败，请检查网络后重试"):
         for w in self.inner.winfo_children():
             w.destroy()
@@ -528,15 +557,16 @@ class Page(tk.Frame):
             return
         self._render_grid(vods, page, pagecount)
 
-    def _render_grid(self, vods, page, pagecount):
+    def _render_grid(self, vods, page, pagecount, append=False):
         if not self.winfo_exists():
             return
         self._prio = 0
-        self.vods = vods
+        if not append:
+            self.vods = vods
         self.page_index, self.page_count = page, pagecount
         # 首个自动选中的分类若无内容，自动尝试下一个分类（源数据漂移兜底；
         # 首页 tab 无内容时落到第一个真实分类，对应原版进入源即展示内容）
-        if not vods and self._auto and self.classes:
+        if not append and not vods and self._auto and self.classes:
             ids = [c[0] for c in self.classes]
             if self.cur_class is None:
                 self.select_class(ids[0], auto=True)
@@ -547,7 +577,7 @@ class Page(tk.Frame):
         self._auto = False
         for w in self.inner.winfo_children():
             w.destroy()
-        if not vods:
+        if not self.vods:
             tk.Label(self.inner, text="暂无内容", bg=BG, fg=FG_DIM,
                      font=tv_font(13)).grid(row=0, column=0, padx=20, pady=20)
             return
@@ -556,27 +586,33 @@ class Page(tk.Frame):
         poster_grid.fill_columns(self.inner, cols)
         self._layout_used = (cols, pw)
         btns = []
-        for i, (vid, name, pic, remark) in enumerate(vods):
+        for i, (vid, name, pic, remark) in enumerate(self.vods):
             _cell, b, poster = poster_grid.cell(
                 self.inner, i // cols, i % cols, pw, ph, name, remark or "",
-                on_open=lambda v=vid, n=name: self._open_detail(v, n))
+                on_open=lambda v=vid, n=name: self._open_detail(v, n),
+                # 右键单元格 → 按片名跨源搜索（对应原版长按「搜索」）
+                on_right_click=lambda e, n=name: self._search_name(n))
             btns.append(b)
             if pic:
-                self._seq += 1
-                self._load_poster(f"p{self._seq}", poster, pic, size=(pw, ph))
+                # key 按 vod_id 稳定：追加分页重渲染时复用已下载/已缓存的海报
+                self._load_poster(f"g{vid}", poster, pic, size=(pw, ph))
         from .theme import grid_key_nav
         grid_key_nav(btns, cols)
-        # 分页
+        # 分页：还有下一页时给「加载更多」，追加而不是替换
         pager = tk.Frame(self.inner, bg=BG)
-        pager.grid(row=(len(vods) + cols - 1) // cols + 1, column=0,
+        pager.grid(row=(len(self.vods) + cols - 1) // cols + 1, column=0,
                    columnspan=cols, pady=14)
         if self.page_index < self.page_count:
-            FocusLabel(pager, text="下一页 ▶", bg=PANEL, fg=FG, font=tv_font(12),
-                       on_select=self._next_page).pack(side="left", padx=8)
+            FocusLabel(pager, text="加载更多 ▼", bg=PANEL, fg=FG, font=tv_font(12),
+                       on_select=self._load_more).pack(side="left", padx=8)
         tk.Label(pager, text=f"{self.page_index}/{self.page_count}",
                  bg=BG, fg=FG_DIM, font=tv_font(11)).pack(side="left", padx=8)
         if btns:
-            btns[0].focus_set()
+            # 追加分页时焦点落在新加载的第一条，而不是跳回顶部
+            focus_idx = getattr(self, "_append_focus", 0)
+            self._append_focus = 0
+            focus_idx = min(max(focus_idx, 0), len(btns) - 1)
+            btns[focus_idx].focus_set()
         self._restore_scroll()
 
     def _restore_scroll(self):
@@ -654,9 +690,56 @@ class Page(tk.Frame):
         imgcache.load(key, url, on_ready, headers, priority=self._prio,
                       size=size)
 
-    def _next_page(self):
-        self.page_index += 1
-        self._reload_grid()
+    def _load_more(self):
+        """追加下一页（对应原版上拉加载更多）"""
+        if getattr(self, "_loading_more", False):
+            return
+        if self.cur_class is None or self.page_index >= self.page_count:
+            return
+        self._loading_more = True
+        self._request_seq += 1
+        request_seq = self._request_seq
+        target_class = self.cur_class
+        target_page = self.page_index + 1
+        bean, filters = self.bean, dict(self.filter_sel)
+
+        def run():
+            try:
+                result = data_api.get_vods(bean, target_class, target_page,
+                                           filters or None)
+            except Exception as ex:
+                from .paths import log_error
+                log_error("get_vods(更多) 失败 class=%s" % target_class, ex)
+                result = ([], target_page, 1)
+            ui_thread.run(lambda: self._finish_more(
+                request_seq, target_class, target_page, result))
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
+    def _finish_more(self, request_seq, target_class, target_page, result):
+        self._loading_more = False
+        if request_seq != self._request_seq or target_class != self.cur_class:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        vods, page, pagecount = result
+        if not vods:
+            # 没拿到新内容：当作已经到底，避免按钮反复空转
+            self.page_count = self.page_index
+            self._render_grid(self.vods, self.page_index, self.page_count,
+                              append=True)
+            return
+        first_new = len(self.vods)
+        self.vods = list(self.vods) + list(vods)
+        self._append_focus = first_new
+        # 保持视觉位置：滚到新加载内容的起始行附近
+        cols = self._grid_layout()[0] or 1
+        rows = max(1, (len(self.vods) + cols - 1) // cols + 1)
+        self._pending_scroll = min(1.0, (first_new // cols) / rows)
+        self._render_grid(self.vods, target_page, pagecount, append=True)
 
     def _open_detail(self, vod_id, vod_name):
         if str(vod_id).startswith("msearch:"):
@@ -674,13 +757,66 @@ class Page(tk.Frame):
                 return
             except Exception:
                 pass
+        tag = ""
+        try:
+            tag = data_api.get_vod_tag(self.bean, vod_id) if self.bean else ""
+        except Exception:
+            tag = ""
+        if tag == "folder":
+            self._open_folder(vod_id, vod_name)
+            return
+        if tag == "action":
+            self._run_action(vod_id)
+            return
         from .ui_detail import Page as DetailPage
         self.app.switch(DetailPage, source_key=self.source_key,
                         vod_id=vod_id, vod_name=vod_name)
 
+    def _open_folder(self, folder_id, folder_name):
+        """文件夹条目：以条目 id 作为分类 id 再取一页列表（对应 vod_tag=folder）"""
+        self._folder_stack.append({"class_id": self.cur_class,
+                                   "title": self._folder_title})
+        self._folder_title = folder_name
+        self.cur_class = str(folder_id)
+        self.page_index = 1
+        self.vods = []
+        self.filter_sel = {}
+        self.status_filter.configure(text=f"📁 {folder_name}")
+        self._reload_grid()
+
+    def _run_action(self, action_id):
+        """动作条目：调用爬虫 action（vod_tag=action）"""
+        self.status_filter.configure(text=f"正在执行：{action_id[:20]}…")
+
+        def run():
+            try:
+                ok, res = data_api.do_action(self.bean, action_id)
+            except Exception as ex:
+                ok, res = False, str(ex)
+            msg = (f"已执行 {action_id[:20]}" if ok else f"执行失败：{res}")
+            if ok and res and isinstance(res, str):
+                msg = res[:50]
+            ui_thread.run(lambda: self.status_filter.configure(text=msg))
+        import threading
+        threading.Thread(target=run, daemon=True).start()
+
     # ---------- 合并主页：日期 / 功能菜单 / 豆瓣热播 ----------
     def _back_home_tab(self):
-        """← 返回主页 tab（合并页内回首页内容区）"""
+        """← 返回：文件夹 → 上一级；分类 → 主页 tab"""
+        if self._folder_stack:
+            st = self._folder_stack.pop()
+            self.cur_class = st.get("class_id")
+            self._folder_title = st.get("title", "")
+            self.page_index = 1
+            self.vods = []
+            self.filter_sel = {}
+            try:
+                self.status_filter.configure(
+                    text=f"📁 {self._folder_title}" if self._folder_title else "")
+            except tk.TclError:
+                pass
+            self._reload_grid()
+            return
         if self.cur_class is not None:
             self.select_class(None)
         else:
@@ -789,40 +925,126 @@ class Page(tk.Frame):
                           r["vod_id"], r["source_key"]))
         self._render_home_items("观看历史", items, "history")
 
+    _DOUBAN_YEARS = ["全部", "2026", "2025", "2024", "2023", "2022", "2021",
+                     "2020", "2019", "2018"]
+
+    def _douban_year(self):
+        return str(hawk.get(hawk.DOUBAN_YEAR, "") or "")
+
+    def _cycle_douban_year(self):
+        """点击年份按钮循环切换「全部 → 2026 → 2025 …」（对应原版年份筛选）"""
+        cur = self._douban_year() or "全部"
+        try:
+            idx = self._DOUBAN_YEARS.index(cur)
+        except ValueError:
+            idx = 0
+        nxt = self._DOUBAN_YEARS[(idx + 1) % len(self._DOUBAN_YEARS)]
+        hawk.put(hawk.DOUBAN_YEAR, "" if nxt == "全部" else nxt)
+        self._load_recommend()
+
+    def _douban_subjects(self, year):
+        """豆瓣热播：新接口 new_search_subjects（支持年份），失败回落旧接口"""
+        ua = {"User-Agent": "Mozilla/5.0"}
+        url = "https://movie.douban.com/j/new_search_subjects"
+        params = {"sort": "U", "range": "0,10", "genres": "热门"}
+        if year:
+            params["year"] = year
+        try:
+            r = requests.get(url, params=params, timeout=8, verify=False,
+                             headers=ua)
+            data = r.json()
+            rows = data.get("data") or []
+            items = [(s.get("title", ""), s.get("cover", ""), s.get("rate", ""))
+                     for s in rows if s.get("title")][:12]
+            if items:
+                return items
+        except Exception:
+            pass
+        # 旧接口只支持 tag，无年份筛选
+        try:
+            r = requests.get("https://movie.douban.com/j/search_subjects",
+                             params={"type": "movie", "tag": "热门",
+                                     "page_limit": 12, "page": 1},
+                             timeout=8, verify=False, headers=ua)
+            rows = r.json().get("subjects") or []
+            return [(s.get("title", ""), s.get("cover", ""), s.get("rate", ""))
+                    for s in rows if s.get("title")][:12]
+        except Exception:
+            return []
+
     def _load_recommend(self):
-        """豆瓣热播（对应 UserFragment.setDouBanData，按天缓存；失败静默）"""
+        """豆瓣热播（对应 UserFragment.setDouBanData，按天+年份缓存；失败静默）"""
+        year = self._douban_year()
+
         def run():
             today = datetime.date.today().isoformat()
             cache = hawk.get("douban_rec_day", None)
             items = None
-            if cache and cache.get("day") == today:
+            if (cache and cache.get("day") == today
+                    and (cache.get("year") or "") == year):
                 items = cache.get("items")
             if not items:
-                try:
-                    r = requests.get(
-                        "https://movie.douban.com/j/search_subjects",
-                        params={"type": "movie", "tag": "热门", "page_limit": 12,
-                                "page": 1},
-                        timeout=8, verify=False,
-                        headers={"User-Agent": "Mozilla/5.0"})
-                    data = r.json()
-                    items = [(s.get("title", ""), s.get("cover", ""),
-                              s.get("rate", ""))
-                             for s in data.get("subjects", [])][:12]
-                except Exception:
-                    items = None
+                items = self._douban_subjects(year)
                 if items:
-                    hawk.put("douban_rec_day", {"day": today, "items": items})
-            if items:
-                ui_thread.run(lambda: self._render_home_items(
-                    "豆瓣热播",
-                    [(n, c, (f"评分 {rt}" if rt else ""), None, None)
-                     for n, c, rt in items], "douban"))
-            else:
-                ui_thread.run(lambda: self._render_home_items(
-                    "豆瓣热播", [], "douban"))
+                    hawk.put("douban_rec_day",
+                             {"day": today, "year": year, "items": items})
+            header = "豆瓣热播" + (f" · {year}" if year else "")
+            ui_thread.run(lambda: self._render_home_items(
+                header,
+                [(n, c, (f"评分 {rt}" if rt else ""), None, None)
+                 for n, c, rt in (items or [])], "douban"))
         import threading
         threading.Thread(target=run, daemon=True).start()
+
+    def _wallpaper_photo(self):
+        """首页壁纸横幅：设置 › 壁纸开启时显示
+
+        优先用户指定图片（PIL 精确裁切，tk.PhotoImage 兜底）；没有素材时
+        用主题色竖向渐变占位（不联网、不依赖外部图片）。按宽度缓存复用。
+        """
+        try:
+            if not hawk.get(hawk.WALLPAPER, False):
+                return None
+        except Exception:
+            return None
+        try:
+            w = self.canvas.winfo_width()
+        except tk.TclError:
+            w = 0
+        w = max(400, min(int(w) if w > 80 else 1200, 1920))
+        h = 150
+        cache = getattr(self, "_wall_cache", None)
+        if cache and cache[0] == w:
+            return cache[1]
+        photo = None
+        path = str(hawk.get(hawk.WALLPAPER_OVERRIDE, "") or "")
+        if path and os.path.isfile(path):
+            try:
+                from PIL import Image, ImageOps, ImageTk
+                im = ImageOps.fit(Image.open(path).convert("RGB"), (w, h),
+                                  Image.LANCZOS)
+                photo = ImageTk.PhotoImage(im)
+            except Exception:
+                try:
+                    photo = tk.PhotoImage(file=path)
+                except tk.TclError:
+                    photo = None
+        if photo is None:
+            try:
+                from PIL import Image, ImageDraw, ImageTk
+                top, bottom = (32, 42, 60), (14, 16, 22)
+                im = Image.new("RGB", (w, h))
+                d = ImageDraw.Draw(im)
+                for y in range(h):
+                    t = y / max(1, h - 1)
+                    d.line([(0, y), (w, y)], fill=tuple(
+                        int(top[i] + (bottom[i] - top[i]) * t)
+                        for i in range(3)))
+                photo = ImageTk.PhotoImage(im)
+            except Exception:
+                return None
+        self._wall_cache = (w, photo)
+        return photo
 
     def _render_home_items(self, header, items, kind):
         """首页推荐位渲染（kind：douban 豆瓣热播 / site 站点推荐 / history 观看历史）"""
@@ -837,8 +1059,16 @@ class Page(tk.Frame):
         cols, _cell_w, pw, ph = self._grid_layout()
         poster_grid.fill_columns(self.inner, cols)
         self._layout_used = (cols, pw)
+        row0 = 0
+        # 首页壁纸横幅（设置 › 壁纸开启；无自定义图片时用主题色渐变占位）
+        wall = self._wallpaper_photo()
+        if wall is not None:
+            self._wall_photo = wall
+            tk.Label(self.inner, image=wall, bd=0, bg=BG).grid(
+                row=0, column=0, columnspan=cols, sticky="ew", pady=(0, 8))
+            row0 = 1
         head = tk.Frame(self.inner, bg=BG)
-        head.grid(row=0, column=0, columnspan=cols, sticky="ew", pady=(4, 10))
+        head.grid(row=row0, column=0, columnspan=cols, sticky="ew", pady=(4, 10))
         tk.Label(head, text=header, bg=BG, fg=ACCENT,
                  font=tv_font(14, True)).pack(side="left", padx=(4, 0))
         hint = {"douban": "点击海报 → 全源搜索播放",
@@ -851,12 +1081,18 @@ class Page(tk.Frame):
         FocusLabel(head, text="　⚙ 更换推荐", bg=PANEL, fg=FG, font=tv_font(10),
                    padx=10, pady=4,
                    on_select=self._open_rec_setting).pack(side="left")
+        if kind == "douban":
+            year = self._douban_year() or "全部"
+            FocusLabel(head, text=f"　📅 年份 {year}", bg=PANEL, fg=FG,
+                       font=tv_font(10), padx=10, pady=4,
+                       on_select=self._cycle_douban_year).pack(side="left",
+                                                               padx=(4, 0))
         if not items:
             msg = ("还没有观看记录：点开一部影片开始播放后，就会出现在这里"
                    if kind == "history"
                    else "该源暂无推荐内容，可到「设置 › 首页推荐」切换其它类型")
             box = tk.Frame(self.inner, bg=BG)
-            box.grid(row=1, column=0, columnspan=cols, pady=40)
+            box.grid(row=row0 + 1, column=0, columnspan=cols, pady=40)
             tk.Label(box, text=msg, bg=BG, fg=FG_DIM,
                      font=tv_font(12)).pack(pady=(0, 10))
             if kind == "history":
@@ -874,7 +1110,8 @@ class Page(tk.Frame):
                 dele = (lambda e, n=name, v=vod_id, s=src_key:
                         self._delete_history(n, v, s))
             _cell, b, poster = poster_grid.cell(
-                self.inner, 1 + i // cols, i % cols, pw, ph, name, note or "",
+                self.inner, row0 + 1 + i // cols, i % cols, pw, ph, name,
+                note or "",
                 on_open=lambda n=name, v=vod_id, s=src_key:
                 self._open_rec_item(kind, n, v, s),
                 on_right_click=dele)
@@ -933,3 +1170,13 @@ class Page(tk.Frame):
             page.do_search()
         except Exception:
             pass
+
+    def destroy(self):
+        # 页面绑定的顶层快捷键（F5）要解绑，否则每次进出页面都会叠加一份
+        for seq, fid in getattr(self, "_app_binds", []):
+            try:
+                self.app.unbind(seq, fid)
+            except Exception:
+                pass
+        self._app_binds = []
+        super().destroy()

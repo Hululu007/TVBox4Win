@@ -17,6 +17,39 @@ _classes_cache = {}
 
 _filters_cache = {}
 
+# 最近一次播放地址的来源说明（播放页 OSD 显示「解析来自」）
+# kind: 直链 / 网页嗅探 / 解析 / 爬虫；name 为解析接口或站点名
+LAST_RESOLVE = {"kind": "", "name": ""}
+
+
+def _mark_resolve(kind, name=""):
+    LAST_RESOLVE["kind"] = kind or ""
+    LAST_RESOLVE["name"] = name or ""
+
+
+# (站点 key, vod_id) → vod_tag。爬虫列表项里的 folder/action 标记在转成
+# 四元组后会被丢掉，这里单独留存，供网格页判断点击行为。
+_vod_tags = {}
+_TAG_LIMIT = 5000
+
+
+def get_vod_tag(bean, vod_id):
+    """取列表项的 vod_tag（folder/action）；没有返回空串"""
+    return _vod_tags.get((getattr(bean, "key", ""), str(vod_id)), "")
+
+
+def _capture_tags(bean, items):
+    key = getattr(bean, "key", "")
+    for v in items or []:
+        if not isinstance(v, dict):
+            continue
+        tag = str(v.get("vod_tag") or "")
+        if not tag:
+            continue
+        if len(_vod_tags) > _TAG_LIMIT:
+            _vod_tags.clear()
+        _vod_tags[(key, str(v.get("vod_id", "")))] = tag
+
 
 def get_filters(bean):
     """分类筛选器（对应 Java sortJson 的 filters + getSortFilter）
@@ -191,6 +224,7 @@ def get_vods(bean, class_id, page=1, extend=None):
         else:
             cfg = sp.category_content(
                 class_id, page, True, __import__("json").dumps(extend or {}, ensure_ascii=False))
+        _capture_tags(bean, cfg.get("list"))
         vods = []
         for v in cfg.get("list", []):
             vods.append((str(v.get("vod_id", "")), str(v.get("vod_name", "")),
@@ -212,6 +246,7 @@ def get_vods(bean, class_id, page=1, extend=None):
     pagecount = 1
     if cfg:
         pagecount = int(cfg.get("pagecount", 1) or 1)
+        _capture_tags(bean, cfg.get("list"))
         for v in cfg.get("list", []):
             vods.append((str(v.get("vod_id", "")), str(v.get("vod_name", "")),
                          str(v.get("vod_pic", "")), str(v.get("vod_remarks", ""))))
@@ -222,6 +257,7 @@ def search_vods(bean, wd):
     if _is_spider(bean):
         from .spider import get_spider
         cfg = get_spider(bean).search_content(wd)
+        _capture_tags(bean, cfg.get("list"))
         return [(str(v.get("vod_id", "")), str(v.get("vod_name", "")),
                  str(v.get("vod_pic", "")), str(v.get("vod_remarks", "")))
                 for v in cfg.get("list", [])]
@@ -233,10 +269,27 @@ def search_vods(bean, wd):
         _cms_url(bean, f"ac=detail&wd={urllib.parse.quote(wd)}")))
     vods = []
     if cfg:
+        _capture_tags(bean, cfg.get("list"))
         for v in cfg.get("list", []):
             vods.append((str(v.get("vod_id", "")), str(v.get("vod_name", "")),
                          str(v.get("vod_pic", "")), str(v.get("vod_remarks", ""))))
     return vods
+
+
+def do_action(bean, action):
+    """执行爬虫 action（列表项 vod_tag == "action" 点击时调用）
+    返回 (ok, result_or_message)"""
+    if not _is_spider(bean):
+        return False, "当前源不支持动作"
+    try:
+        from .spider import get_spider
+        sp = get_spider(bean)
+        fn = getattr(sp, "action", None)
+        if not callable(fn):
+            return False, "当前爬虫不支持 action"
+        return True, fn(str(action))
+    except Exception as e:
+        return False, str(e)
 
 
 def _clean_html(text):
@@ -490,12 +543,24 @@ def _try_parse_bean(bean, page_url):
                     "parse": parse_flag,
                 }, page_url)
                 if got:
-                    return got
+                    return got[0], got[1], _bean_name(bean, api)
         # 解析接口返回的是播放页（或无效果）：静态嗅探代替原版 WebView
         sniffed = _sniff_text(text, target)
         if sniffed:
-            return sniffed, headers
+            return sniffed, headers, _bean_name(bean, api)
     return None
+
+
+def _bean_name(bean, api=""):
+    name = str(getattr(bean, "name", "") or "").strip()
+    if name:
+        return name
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(str(api or "")).hostname or ""
+        return host or "解析接口"
+    except Exception:
+        return "解析接口"
 
 
 def _second_parse(bean, page_url, play_url):
@@ -509,7 +574,7 @@ def _second_parse(bean, page_url, play_url):
         beans.insert(0, ParseBean("playUrl", play_url, None, 4))
     if not beans:
         sniffed = _sniff_page(page_url)
-        return (sniffed, None) if sniffed else None
+        return (sniffed, None, "网页嗅探") if sniffed else None
 
     # 解析接口并发执行，谁先成功用谁（对应 type3/4 的聚合解析）
     from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
@@ -532,7 +597,7 @@ def _second_parse(bean, page_url, play_url):
     # 最后直接嗅探原网页
     sniffed = _sniff_page(page_url)
     if sniffed:
-        return sniffed, None
+        return sniffed, None, "网页嗅探"
     return None
 
 
@@ -557,6 +622,7 @@ def get_play_url(bean, flag, ep_url):
     if not _is_spider(bean):
         # 原版 type0/1：isVideoFormat(requestUrl) ? 直接播 : parse=1 二次解析
         if is_video_format(ep_url) or not ep_url.startswith(("http://", "https://")):
+            _mark_resolve("直链")
             return _finalize(ep_url, None)
         # 分享页/网页直链：先嗅探页面直链（快，~1s），失败再试 parses 接口
         try:
@@ -564,6 +630,7 @@ def get_play_url(bean, flag, ep_url):
         except Exception:
             sniffed = None
         if sniffed:
+            _mark_resolve("网页嗅探")
             return _finalize(sniffed, None)
         try:
             got = _second_parse(bean, ep_url,
@@ -571,7 +638,9 @@ def get_play_url(bean, flag, ep_url):
         except Exception:
             got = None
         if got:
+            _mark_resolve("解析", got[2])
             return _finalize(got[0], got[1])
+        _mark_resolve("直链")
         return _finalize(ep_url, None)  # 解析失败原样返回，让播放器报错可见
     from .apiconfig import api_config, headers_from
     from .spider import get_spider
@@ -583,18 +652,22 @@ def get_play_url(bean, flag, ep_url):
     if not url:
         return url, hdr
     if not r.get("parse") in (1, "1", True):
+        _mark_resolve("爬虫", getattr(bean, "name", "") or "")
         return _finalize(url, hdr)
     # parse==1：网页链接，需要二次解析
     if is_video_format(url):
+        _mark_resolve("爬虫", getattr(bean, "name", "") or "")
         return _finalize(url, hdr)
     sniffed = _sniff_page(url, hdr)
     if sniffed:
+        _mark_resolve("网页嗅探")
         return _finalize(sniffed, hdr)
     try:
         got = _second_parse(bean, url, str(r.get("playUrl") or ""))
     except Exception:
         got = None
     if got:
+        _mark_resolve("解析", got[2])
         return _finalize(got[0], got[1])
     return _finalize(url, hdr)  # 解析失败原样返回，让 mpv 报错可见
 
@@ -636,6 +709,7 @@ def clear_caches():
     """换源后清空分类/筛选缓存与 spider 进程"""
     _classes_cache.clear()
     _filters_cache.clear()
+    _vod_tags.clear()
     try:
         from .spider import shutdown
         shutdown()

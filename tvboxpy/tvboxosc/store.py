@@ -119,18 +119,73 @@ def get_record(source_key, vod_id):
             "pos": row[3], "duration": row[4], "data_json": data}
 
 
+def _merge_enabled():
+    """观看历史按片名合并（对应原版「合并历史记录」开关）"""
+    try:
+        return bool(hawk.get(hawk.HISTORY_MERGE, 0))
+    except Exception:
+        return False
+
+
 def all_records(limit=0):
-    """全部播放记录（按更新时间倒序）；limit>0 时只取前 N 条（首页观看历史用）"""
+    """全部播放记录（按更新时间倒序）
+
+    limit>0 时只取前 N 条（首页观看历史用）；开启「历史合并」后同一片名
+    只保留最近一条（不同源/不同线路的记录合并显示）。
+    """
     sql = ("SELECT vod_id, vod_name, source_key, play_tag, play_flag, play_ep, "
            "pos, duration, update_time, vod_pic FROM vod_record "
            "ORDER BY update_time DESC")
-    if limit:
+    merged = _merge_enabled()
+    if limit and not merged:
         sql += " LIMIT %d" % int(limit)
     with _lock:
         rows = _conn().execute(sql).fetchall()
-    return [{"vod_id": r[0], "vod_name": r[1], "source_key": r[2], "play_tag": r[3],
-             "play_flag": r[4], "play_ep": r[5], "pos": r[6], "duration": r[7],
-             "update_time": r[8], "vod_pic": r[9] or ""} for r in rows]
+    out = [{"vod_id": r[0], "vod_name": r[1], "source_key": r[2], "play_tag": r[3],
+            "play_flag": r[4], "play_ep": r[5], "pos": r[6], "duration": r[7],
+            "update_time": r[8], "vod_pic": r[9] or ""} for r in rows]
+    if merged:
+        seen = set()
+        keep = []
+        for rec in out:
+            key = rec["vod_name"] or rec["vod_id"]
+            if key in seen:
+                continue
+            seen.add(key)
+            keep.append(rec)
+        out = keep
+        if limit:
+            out = out[:int(limit)]
+    return out
+
+
+def clear_records():
+    """清空全部观看历史"""
+    with _lock:
+        c = _conn()
+        c.execute("DELETE FROM vod_record")
+        c.commit()
+
+
+def clear_collects():
+    """清空全部收藏"""
+    with _lock:
+        c = _conn()
+        c.execute("DELETE FROM vod_collect")
+        c.commit()
+
+
+def reset_connection():
+    """恢复备份后重建数据库连接（先关闭旧连接，释放文件句柄）"""
+    global _db
+    with _lock:
+        if _db is not None:
+            try:
+                _db.close()
+            except Exception:
+                pass
+            _db = None
+
 
 
 def delete_record(vod_id, source_key):
