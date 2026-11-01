@@ -2,7 +2,7 @@
 
 **TVBox4Win** — 安卓 TV 上那个影视聚合播放器 TVBox，在 Windows / macOS 上的一次完整复刻。
 
-当前版本：**v0.9.6.1**（Windows / macOS 双平台；版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
+当前版本：**v0.9.6.2**（Windows / macOS 双平台；版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
 
 ## 💡 为什么会有这个项目
 
@@ -35,7 +35,7 @@
 
 ## 📥 免安装下载（推荐）
 
-不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases) 下载 Windows 安装包（当前最新为 `TVBox4Win-v0.9.6.1-win64.zip`）：
+不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases) 下载 Windows 安装包（当前最新为 `TVBox4Win-v0.9.6.2-win64.zip`）：
 
 1. 解压到任意可写目录
 2. 双击 `TVBox4Win.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
@@ -84,7 +84,8 @@
 
 | 版本 | 主要变化 | 下载 |
 |---|---|---|
-| **v0.9.6.1**（最新） | **平台层重构**：Windows/macOS 差异集中到 `host/` 平台层，两边改动互不影响；修 Windows 包误含 macOS 后端（71MB → 67.7MB）；新增平台隔离契约测试与离线播放链路测试 | [v0.9.6.1](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.1) |
+| **v0.9.6.2**（最新） | **播放解析对齐原版**：parse type 0/1/2/3/4 全语义、配置 hosts 与嗅探/过滤规则、扩展嗅探正则、本地 `/proxy` 直播代理（m3u8 分片改写 + 请求头透传）、py 爬虫 `localProxy` 接入 | [v0.9.6.2](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.2) |
+| v0.9.6.1 | **平台层重构**：Windows/macOS 差异集中到 `host/` 平台层，两边改动互不影响；修 Windows 包误含 macOS 后端（71MB → 67.7MB）；新增平台隔离契约测试与离线播放链路测试 | [v0.9.6.1](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.1) |
 | v0.9.6 | **新增 macOS 原生支持**：AVFoundation 播放后端、`.app` 打包、苹方字体、无 JDK 时自动跳过 jar 源；Windows 部分与 v0.9.5 一致 | [v0.9.6](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6)（仅 macOS 构建） |
 | v0.9.5 | 点播/搜索页海报网格自适应窗口宽度（右侧留白消除）、海报放大到原版 244:320 比例、片名叠加海报底部、菜单按钮均分整行 | [v0.9.5](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.5) |
 | v0.9.4 | 直播页整页重构（两层列表 + 进入即播）、修 Esc 退不出的卡死、全局频道编号 + EPG 节目单 | [v0.9.4](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.4) |
