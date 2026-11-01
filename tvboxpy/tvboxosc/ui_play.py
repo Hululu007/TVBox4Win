@@ -137,6 +137,7 @@ class Page(tk.Frame):
         self._dm_path = None       # 弹幕合成的 ASS 文件
         self._dm_ep = None         # 弹幕对应的集名（避免重复拉取）
         self._app_binds = []
+        self._popup = None  # 当前浮层面板（同一时间只允许一个，重复点击不叠加）
         self._seq = 0  # 播放请求序号：后台解析返回时页面可能已切集/销毁
         self._hide_job = None
         self._cur_pos = 0.0
@@ -376,6 +377,7 @@ class Page(tk.Frame):
         self._watchdog = None
         self._resolve_job = None
         self._osd_job = None
+        self._close_popup()
         self._release_awake()
         try:
             if self.player:
@@ -498,15 +500,50 @@ class Page(tk.Frame):
         self.after(1500, lambda: self.status.configure(text=""))
         self._show_chrome()
 
-    def _show_more(self):
-        """更多功能面板：字幕/音轨/弹幕/画面/OSD/锁屏"""
+    # ---- 浮层面板（更多/字幕/音轨/弹幕/选集/线路） ----
+
+    def _popup_exists(self, title):
+        """同名浮层是否已经打开"""
+        p = getattr(self, "_popup", None)
+        if p is None:
+            return False
+        try:
+            return bool(p.winfo_exists()) and p.title() == title
+        except tk.TclError:
+            return False
+
+    def _close_popup(self):
+        """关闭当前浮层；已销毁的引用也一并清掉"""
+        p = getattr(self, "_popup", None)
+        self._popup = None
+        if p is not None:
+            try:
+                if p.winfo_exists():
+                    p.destroy()
+            except tk.TclError:
+                pass
+
+    def _new_popup(self, title):
+        """创建浮层：先关掉上一个，保证同一时间只有一个面板"""
+        self._close_popup()
         panel = tk.Toplevel(self)
-        panel.title("更多")
+        panel.title(title)
         panel.configure(bg="#101010")
         try:
             panel.attributes("-topmost", True)  # 全屏时保持可见
         except Exception:
             pass
+        panel.protocol("WM_DELETE_WINDOW", self._close_popup)
+        panel.bind("<Escape>", lambda e: self._close_popup())
+        self._popup = panel
+        return panel
+
+    def _show_more(self):
+        """更多功能面板：字幕/音轨/弹幕/画面/OSD/锁屏（再点一次收起）"""
+        if self._popup_exists("更多"):
+            self._close_popup()
+            return
+        panel = self._new_popup("更多")
         items = [
             ("字幕", self._sub_menu),
             ("音轨", self._audio_menu),
@@ -514,11 +551,11 @@ class Page(tk.Frame):
             ("画面比例", self._cycle_scale),
             ("显示信息 (i)", self._toggle_osd),
             ("锁屏 (L)", self._toggle_lock),
-            ("关闭", panel.destroy),
+            ("关闭", self._close_popup),
         ]
         for i, (text, cb) in enumerate(items):
             FocusLabel(panel, text=text, bg="#1E1E1E", fg=FG, font=tv_font(11),
-                       on_select=lambda c=cb, p=panel: (p.destroy(), c())
+                       on_select=lambda c=cb: (self._close_popup(), c())
                        ).grid(row=i // 4, column=i % 4, padx=6, pady=6,
                               ipadx=10, ipady=2)
 
@@ -529,16 +566,10 @@ class Page(tk.Frame):
                 if t.get("id") is not None]
 
     def _sub_menu(self):
-        panel = tk.Toplevel(self)
-        panel.title("字幕")
-        panel.configure(bg="#101010")
-        try:
-            panel.attributes("-topmost", True)
-        except Exception:
-            pass
+        panel = self._new_popup("字幕")
         row = 0
         FocusLabel(panel, text="关闭字幕", bg="#1E1E1E", fg=FG, font=tv_font(11),
-                   on_select=lambda p=panel: (p.destroy(), self._sub_off())
+                   on_select=lambda: (self._close_popup(), self._sub_off())
                    ).grid(row=row, column=0, padx=6, pady=4, sticky="w")
         row += 1
         for t in self._sub_tracks():
@@ -546,13 +577,13 @@ class Page(tk.Frame):
                      or f"字幕 {t.get('id')}")
             label = str(label).split("/")[-1][:28]
             FocusLabel(panel, text=label, bg="#1E1E1E", fg=FG, font=tv_font(11),
-                       on_select=lambda p=panel, tid=t.get("id"):
-                       (p.destroy(), self._pick_sub(tid))
+                       on_select=lambda tid=t.get("id"):
+                       (self._close_popup(), self._pick_sub(tid))
                        ).grid(row=row, column=0, padx=6, pady=4, sticky="w")
             row += 1
         FocusLabel(panel, text="加载本地字幕…", bg="#1E1E1E", fg=FG,
                    font=tv_font(11),
-                   on_select=lambda p=panel: (p.destroy(), self._load_sub_file())
+                   on_select=lambda: (self._close_popup(), self._load_sub_file())
                    ).grid(row=row, column=0, padx=6, pady=4, sticky="w")
         row += 1
         FocusLabel(panel, text="字幕延迟 -0.5s", bg="#1E1E1E", fg=FG,
@@ -626,19 +657,13 @@ class Page(tk.Frame):
             self.status.configure(text="当前视频只有一条音轨")
             self.after(1500, lambda: self.status.configure(text=""))
             return
-        panel = tk.Toplevel(self)
-        panel.title("音轨")
-        panel.configure(bg="#101010")
-        try:
-            panel.attributes("-topmost", True)
-        except Exception:
-            pass
+        panel = self._new_popup("音轨")
         for i, t in enumerate(tracks):
             label = t.get("title") or t.get("lang") or f"音轨 {i + 1}"
             FocusLabel(panel, text=str(label)[:24], bg="#1E1E1E", fg=FG,
                        font=tv_font(11),
-                       on_select=lambda p=panel, tid=t.get("id"):
-                       (p.destroy(), self._pick_audio(tid))
+                       on_select=lambda tid=t.get("id"):
+                       (self._close_popup(), self._pick_audio(tid))
                        ).grid(row=i, column=0, padx=6, pady=4, sticky="w")
 
     def _pick_audio(self, track_id):
@@ -650,23 +675,17 @@ class Page(tk.Frame):
     # ---- 弹幕（P1） ----
 
     def _danmaku_menu(self):
-        panel = tk.Toplevel(self)
-        panel.title("弹幕")
-        panel.configure(bg="#101010")
-        try:
-            panel.attributes("-topmost", True)
-        except Exception:
-            pass
+        panel = self._new_popup("弹幕")
         on = bool(hawk.get(hawk.DANMAKU_ENABLE, 0))
         items = [
             ("关闭弹幕" if on else "开启弹幕", self._toggle_danmaku),
             ("加载本地弹幕…", self._load_danmaku_file),
             ("重新加载", self._reload_danmaku),
-            ("关闭", panel.destroy),
+            ("关闭", self._close_popup),
         ]
         for i, (text, cb) in enumerate(items):
             FocusLabel(panel, text=text, bg="#1E1E1E", fg=FG, font=tv_font(11),
-                       on_select=lambda c=cb, p=panel: (p.destroy(), c())
+                       on_select=lambda c=cb: (self._close_popup(), c())
                        ).grid(row=i // 2, column=i % 2, padx=6, pady=4,
                               ipadx=8, ipady=1)
 
@@ -1040,13 +1059,7 @@ class Page(tk.Frame):
         return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
     def _show_series(self):
-        panel = tk.Toplevel(self)
-        panel.title("选集")
-        panel.configure(bg="#101010")
-        try:
-            panel.attributes("-topmost", True)  # 全屏时保持可见
-        except Exception:
-            pass
+        panel = self._new_popup("选集")
         names, urls = self.series[0][1], self.series[1]
         total = min(len(names), len(urls))
         pages = max(1, (total + EPS_PER_PAGE - 1) // EPS_PER_PAGE)
@@ -1069,8 +1082,8 @@ class Page(tk.Frame):
                 FocusLabel(grid, text=names[i][:14],
                            bg="#FF5722" if i == self.ep_index else "#1E1E1E",
                            fg=FG, font=tv_font(11),
-                           on_select=lambda uu=urls[i], ii=i, p=panel:
-                           (p.destroy(), self._switch_ep(ii, uu))
+                           on_select=lambda uu=urls[i], ii=i:
+                           (self._close_popup(), self._switch_ep(ii, uu))
                            ).grid(row=k // cols, column=k % cols, padx=5, pady=5)
             page_lbl.configure(text=f"{state['page'] + 1} / {pages} 页")
 
@@ -1204,23 +1217,17 @@ class Page(tk.Frame):
         """线路选择面板（对应原版线路切换）"""
         if len(self.all_urls) < 2:
             return
-        panel = tk.Toplevel(self)
-        panel.title("线路")
-        panel.configure(bg="#101010")
-        try:
-            panel.attributes("-topmost", True)
-        except Exception:
-            pass
+        panel = self._new_popup("线路")
         for i, (flag, _names) in enumerate(self.all_urls):
             FocusLabel(
                 panel, text=(flag or f"线路{i + 1}")[:14],
                 bg="#FF5722" if i == self.line_index else "#1E1E1E",
                 fg=FG, font=tv_font(11),
-                on_select=lambda ii=i, p=panel: self._pick_line(p, ii)
+                on_select=lambda ii=i: self._pick_line(ii)
             ).grid(row=i // 6, column=i % 6, padx=5, pady=5)
 
-    def _pick_line(self, panel, li):
-        panel.destroy()
+    def _pick_line(self, li):
+        self._close_popup()
         urls = self.all_urls[li]
         if urls:
             self._switch_line(li, ep_index=min(self.ep_index, len(urls) - 1))
