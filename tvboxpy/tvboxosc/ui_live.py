@@ -5,7 +5,9 @@ import tkinter as tk
 
 from . import apiconfig, hawk, ui_thread
 from .player import MpvPlayer
-from .theme import FG, FG_DIM, FocusLabel, tv_font
+from .theme import ACCENT, FG, FG_DIM, FocusLabel, PANEL_HI, tv_font
+
+CHROME_BG = "#0B0F1C"   # 顶栏/控制栏底色（近黑，覆在视频上）
 
 
 def read_live_source(url):
@@ -139,9 +141,13 @@ class Page(tk.Frame):
 
     全屏播放 + 左侧两层列表（一级分组列 → 二级频道列），进入即自动播放默认频道
     （上次频道 → CCTV1 → 第一个分组第一个频道，对应 Java initLiveState）。
-    列表 5 秒无操作自动隐藏，鼠标移动/按键唤出；↑↓ 换台、←→ 切列、数字键选台。
+    顶部常驻状态栏（返回按钮 + 台标 + 时钟，对应 tv_top_status）、底部悬浮控制栏
+    （上一台/暂停/下一台/换源/列表/全屏/退出，对应 backcontroller）；列表与控制栏
+    5 秒无操作自动隐藏，鼠标移动/按键唤出；↑↓ 换台、←→ 切列、数字键选台。
     """
 
+    TOP_H = 46         # 顶部常驻状态栏高度
+    BAR_H = 62         # 底部悬浮控制栏高度
     GROUP_W = 176      # 一级：分组列宽
     CH_W = 300         # 二级：频道列宽
     HIDE_MS = 5000     # 列表空闲自动隐藏
@@ -161,6 +167,7 @@ class Page(tk.Frame):
         self._hide_job = None
         self._digits = ""
         self._digit_job = None
+        self._clock_job = None
         self._visible = True
 
         # 全屏沉浸（对应 LivePlayActivity 全屏）
@@ -175,19 +182,31 @@ class Page(tk.Frame):
         self.video = tk.Frame(self, bg="#000000", highlightthickness=0)
         self.video.place(x=0, y=0, relwidth=1.0, relheight=1.0)
 
+        # 顶部常驻状态栏（对应 tv_top_status + tvChannel）：返回按钮常驻可见。
+        # 原版靠遥控器/系统返回键退出，Windows 没有这个键，必须给鼠标和键盘
+        # 都能一眼看到的出口，否则全屏后没有任何可点的退出入口。
+        self.top = tk.Frame(self, bg=CHROME_BG)
+        self.top.place(x=0, y=0, relwidth=1.0, height=self.TOP_H)
+        self._top_widgets(self.top)
+        self.top.lift()
+
         # 右上角大号台标（对应 tv_selected_channel）
         self.big = tk.Label(self, text="", bg="#000000", fg="#FFFFFF",
                             font=tv_font(40, True))
-        self.big.place(relx=0.985, y=14, anchor="ne")
+        self.big.place(relx=0.985, y=self.TOP_H + 14, anchor="ne")
 
-        # 底部状态：直播源 · 频道 · 线路
-        self.status = tk.Label(self, text="加载频道中...", bg="#000000", fg=FG_DIM,
-                               font=tv_font(11))
-        self.status.place(x=20, rely=0.975, anchor="sw")
+        # 底部悬浮控制栏（对应 backcontroller：上一台/暂停/下一台/换源/列表/全屏/退出）
+        self.bottom = tk.Frame(self, bg=CHROME_BG)
+        self._bottom_widgets(self.bottom)
+        self.bottom.lift()
 
         # 左侧两层列表（对应 tvLeftChannnelListLayout）
         self.overlay = tk.Frame(self, bg="#0B1020", highlightthickness=0)
-        self.overlay.place(x=0, y=0, width=self.GROUP_W + self.CH_W, relheight=1.0)
+        self._place_overlay()
+
+        # 三个面板区域标记：鼠标点在其上时不当作「唤出」处理
+        for w in (self.top, self.bottom, self.overlay):
+            w._is_chrome = True
 
         self.group_col = tk.Frame(self.overlay, bg="#0B1020", width=self.GROUP_W)
         self.group_col.pack(side="left", fill="y")
@@ -208,8 +227,61 @@ class Page(tk.Frame):
                                 fg=FG_DIM, font=tv_font(14))
         self.loading.place(relx=0.5, rely=0.5, anchor="center")
 
+        self.bind("<Configure>", self._on_resize)
+        self._tick_clock()
         self._bind_keys()
         self.after(150, self._load)
+
+    # ------------------------------------------------ 顶栏 / 控制栏 ----
+    def _top_widgets(self, top):
+        """顶部常驻：返回按钮 + 直播源信息（对应 tv_top_status）"""
+        FocusLabel(top, text="← 返回", font=tv_font(12, True), bg=PANEL_HI,
+                   fg="#FFFFFF", on_select=self._stop_and_back,
+                   padx=14, pady=5).pack(side="left", padx=(12, 10), pady=8)
+        self.status = tk.Label(top, text="加载频道中...", bg=CHROME_BG, fg=FG_DIM,
+                               font=tv_font(11), anchor="w")
+        self.status.pack(side="left", padx=(2, 12))
+        self.clock = tk.Label(top, text="", bg=CHROME_BG, fg=FG_DIM,
+                              font=tv_font(11))
+        self.clock.pack(side="right", padx=14)
+
+    def _bottom_widgets(self, b):
+        """底部悬浮控制栏：等价于原版 backcontroller 的可操作入口（右对齐，
+        左侧留给频道列表，避免两层面板互相遮挡）"""
+        row = tk.Frame(b, bg=CHROME_BG)
+        row.pack(side="right", padx=14)
+        self.pause_btn = self._bar_btn(row, "⏸ 暂停", self._toggle_pause)
+        self._bar_btn(row, "⏮ 上一台", lambda: self._step_channel(-1))
+        self._bar_btn(row, "⏭ 下一台", lambda: self._step_channel(1))
+        self._bar_btn(row, "⇄ 换源", self._switch_source)
+        self._bar_btn(row, "☰ 频道列表", self._toggle_list)
+        self._bar_btn(row, "⛶ 窗口/全屏", self._toggle_fullscreen)
+        self._bar_btn(row, "✕ 退出直播", self._stop_and_back, accent=True)
+
+    def _bar_btn(self, parent, text, cb, accent=False):
+        w = FocusLabel(parent, text=text, font=tv_font(12), bg=ACCENT if accent else PANEL_HI,
+                       fg="#FFFFFF", on_select=cb, padx=14, pady=6)
+        w.pack(side="left", padx=5, pady=12)
+        return w
+
+    def _tick_clock(self):
+        """顶部时钟（对应 tvTime）"""
+        import time as _t
+        try:
+            self.clock.configure(text=_t.strftime("%H:%M:%S"))
+        except Exception:
+            return
+        self._clock_job = self.after(1000, self._tick_clock)
+
+    def _on_resize(self, e):
+        if self._visible:
+            self._place_overlay()
+
+    def _place_overlay(self):
+        h = max(120, (self.winfo_height() or 720) - self.TOP_H)
+        self.overlay.place(x=0, y=self.TOP_H, width=self.GROUP_W + self.CH_W,
+                           height=h, relheight=0)
+        self.overlay.lift()
 
     # ------------------------------------------------ 列表容器 ----
     def _scroll(self, parent, bg):
@@ -419,13 +491,23 @@ class Page(tk.Frame):
             "<Next>": lambda: self._step_channel(1),
             "<Key-r>": self._switch_source,
             "<Key-R>": self._switch_source,
-            "<Escape>": self._back,
-            "<BackSpace>": self._back,
+            "<Key-p>": self._toggle_pause,
+            "<Key-P>": self._toggle_pause,
+            "<Key-f>": self._toggle_fullscreen,
+            "<Key-F>": self._toggle_fullscreen,
         }
         for seq, cb in hotkeys.items():
             try:
                 fid = self.app.bind(seq, lambda e, c=cb: (self._wake(), c(), "break")[2],
                                     add="+")
+                self._app_binds.append((seq, fid))
+            except Exception:
+                pass
+        # Esc / BackSpace 单独绑定：不能先 _wake()，否则会把列表重新弹出来，
+        # _back() 看到列表可见就只收起列表，永远走不到退出分支（旧 bug）。
+        for seq in ("<Escape>", "<BackSpace>"):
+            try:
+                fid = self.app.bind(seq, lambda e: (self._back(), "break")[1], add="+")
                 self._app_binds.append((seq, fid))
             except Exception:
                 pass
@@ -438,10 +520,27 @@ class Page(tk.Frame):
                 pass
         for seq in ("<Motion>", "<Button-1>"):
             try:
-                fid = self.app.bind(seq, lambda e: self._wake(), add="+")
+                fid = self.app.bind(seq, self._on_pointer, add="+")
                 self._app_binds.append((seq, fid))
             except Exception:
                 pass
+
+    @staticmethod
+    def _in_chrome(w):
+        """控件是否位于顶栏/控制栏/频道列表内部"""
+        while w is not None:
+            if isinstance(w, (tk.Frame, tk.Toplevel)) and getattr(w, "_is_chrome", False):
+                return True
+            w = getattr(w, "master", None)
+        return False
+
+    def _on_pointer(self, e):
+        """鼠标移动/点击唤出面板；点在面板自身（如「☰ 频道列表」）时只重置
+        隐藏计时，否则 toplevel 的点击回调会把刚收起的面板又弹出来"""
+        if self._in_chrome(getattr(e, "widget", None)):
+            self._reset_hide()
+            return
+        self._wake()
 
     def _focus_area(self):
         w = self.focus_get()
@@ -534,7 +633,10 @@ class Page(tk.Frame):
         self._hide_job = self.after(self.HIDE_MS, self._hide_overlay)
 
     def _show_overlay(self, _e=None):
-        self.overlay.place(x=0, y=0, width=self.GROUP_W + self.CH_W, relheight=1.0)
+        self._place_overlay()
+        self.bottom.place(x=0, rely=1.0, relwidth=1.0, height=self.BAR_H, anchor="sw")
+        self.top.lift()
+        self.bottom.lift()
         self.overlay.lift()
         self._visible = True
 
@@ -543,8 +645,39 @@ class Page(tk.Frame):
         if not self._visible:
             return
         self.overlay.place_forget()
+        self.bottom.place_forget()
         self._visible = False
         self.focus_set()
+
+    def _toggle_list(self):
+        """☰ 频道列表：显隐两层列表（对应原版左右方向键呼出侧栏）"""
+        if self._visible:
+            self._hide_overlay()
+        else:
+            self._show_overlay()
+            self._to_channels()
+        self._reset_hide()
+
+    def _toggle_pause(self):
+        """直播暂停/继续（对应原版 iv_playpause）"""
+        if not self.player:
+            return
+        paused = self.player.toggle_pause()
+        try:
+            self.pause_btn.configure(text="▶ 播放" if paused else "⏸ 暂停")
+        except Exception:
+            pass
+        self.status.configure(text="已暂停" if paused else
+                              f"{self.cur_group} · {self.cur_ch[1] if self.cur_ch else ''}")
+        self._wake()
+
+    def _toggle_fullscreen(self):
+        """窗口/全屏切换（对应原版 F 键）"""
+        try:
+            self.app.attributes("-fullscreen", not self.app.attributes("fullscreen"))
+        except Exception:
+            pass
+        self._wake()
 
     @staticmethod
     def _ensure_visible(canvas, w):
@@ -568,10 +701,18 @@ class Page(tk.Frame):
 
     # ------------------------------------------------ 生命周期 ----
     def _back(self):
+        """Esc / BackSpace（对应原版 onBackPressed）：列表开着先收起，
+        再按一次退出直播。顶栏「← 返回」按钮则是直接退出。"""
         if self._visible:
-            self._hide_overlay()   # 先收列表，再按一次才退出
+            self._hide_overlay()
+            self.status.configure(text="再按 Esc 退出直播")
+            self.after(2000, self._restore_status)
             return
         self._stop_and_back()
+
+    def _restore_status(self):
+        if self.cur_ch:
+            self.status.configure(text=f"{self.cur_ch[0]} · {self.cur_ch[1]}")
 
     def _stop_and_back(self):
         self.app.go_home()
@@ -591,13 +732,13 @@ class Page(tk.Frame):
             except Exception:
                 pass
         self._app_binds = []
-        for job in (self._hide_job, self._digit_job):
+        for job in (self._hide_job, self._digit_job, self._clock_job):
             if job:
                 try:
                     self.after_cancel(job)
                 except Exception:
                     pass
-        self._hide_job = self._digit_job = None
+        self._hide_job = self._digit_job = self._clock_job = None
         try:
             self.app.attributes("-fullscreen", self._was_full)
         except Exception:
