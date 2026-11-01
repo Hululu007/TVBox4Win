@@ -21,7 +21,10 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # macOS 播放后端（player_av 顶层 import AppKit 等仅 mac 存在的框架）：
+    # player.py 只在 IS_MAC 分支导入它们，Windows 运行时不会触碰；
+    # 这里排除以免 PyInstaller 把死代码打进包（体积 +3MB）并报缺模块警告
+    excludes=['tvboxosc.player_av', 'tvboxosc.player_mac'],
     noarchive=False,
     optimize=0,
 )
