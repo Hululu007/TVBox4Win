@@ -2,7 +2,7 @@
 
 **TVBox4Win**：把安卓 TV 上流行的影视聚合播放器 TVBox 完整搬到桌面。
 
-当前版本：**v0.9.6**（macOS 首发版；版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
+当前版本：**v0.9.6.1**（Windows / macOS 双平台；版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
 
 把安卓 TV 上流行的影视聚合播放器 [TVBox](https://github.com/o0HalfLife0o/TVBoxOSC) 复刻到桌面：
 **Python 3 + tkinter** 实现，UI 与交互按原版逐页对齐。同一份代码支持两个平台：
@@ -16,7 +16,7 @@
 
 ## 📥 免安装下载（推荐）
 
-不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases) 下载 Windows 安装包（当前最新为 `TVBox4Win-v0.9.5-win64.zip`；v0.9.6 只发布了 macOS 构建，Windows 二进制随后续版本更新）：
+不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases) 下载 Windows 安装包（当前最新为 `TVBox4Win-v0.9.6.1-win64.zip`）：
 
 1. 解压到任意可写目录
 2. 双击 `TVBox4Win.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
@@ -65,7 +65,8 @@
 
 | 版本 | 主要变化 | 下载 |
 |---|---|---|
-| **v0.9.6**（最新） | **新增 macOS 原生支持**：AVFoundation 播放后端、`.app` 打包、苹方字体、无 JDK 时自动跳过 jar 源；Windows 部分与 v0.9.5 一致 | [v0.9.6](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6)（仅 macOS 构建） |
+| **v0.9.6.1**（最新） | **平台层重构**：Windows/macOS 差异集中到 `host/` 平台层，两边改动互不影响；修 Windows 包误含 macOS 后端（71MB → 67.7MB）；新增平台隔离契约测试与离线播放链路测试 | [v0.9.6.1](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.1) |
+| v0.9.6 | **新增 macOS 原生支持**：AVFoundation 播放后端、`.app` 打包、苹方字体、无 JDK 时自动跳过 jar 源；Windows 部分与 v0.9.5 一致 | [v0.9.6](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6)（仅 macOS 构建） |
 | v0.9.5 | 点播/搜索页海报网格自适应窗口宽度（右侧留白消除）、海报放大到原版 244:320 比例、片名叠加海报底部、菜单按钮均分整行 | [v0.9.5](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.5) |
 | v0.9.4 | 直播页整页重构（两层列表 + 进入即播）、修 Esc 退不出的卡死、全局频道编号 + EPG 节目单 | [v0.9.4](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.4) |
 | v0.9.3 | 自定义直播源（点播/直播双输入、直播历史、txt/m3u/JSON 解析） | [v0.9.3](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.3) |
