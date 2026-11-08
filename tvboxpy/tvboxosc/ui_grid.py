@@ -675,16 +675,15 @@ class Page(tk.Frame):
             return
         max_w, max_h = size or (150, 200)
 
-        def on_ready(k, path):
+        def on_ready(_key, path):
             if not self.winfo_exists() or not poster.winfo_exists():
-                imgcache.drop(k)
                 return
             try:
                 photo = imgcache.fit_photo(tk.PhotoImage(file=path),
                                            max_w, max_h)
             except tk.TclError:
                 return
-            imgcache.keep(k, photo)
+            imgcache.attach(poster, photo)
             poster.configure(image=photo, text="", width=photo.width(),
                              height=photo.height())
         imgcache.load(key, url, on_ready, headers, priority=self._prio,

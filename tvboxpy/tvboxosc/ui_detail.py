@@ -214,15 +214,14 @@ class Page(tk.Frame):
         url, headers = imgcache.parse_pic(pic)
         if not url.startswith("http"):
             return
-        def on_ready(k, path):
+        def on_ready(_key, path):
             if not self.winfo_exists() or not poster.winfo_exists():
-                imgcache.drop(k)
                 return
             try:
                 photo = imgcache.fit_photo(tk.PhotoImage(file=path))
             except tk.TclError:
                 return
-            imgcache.keep(k, photo)
+            imgcache.attach(poster, photo)
             poster.configure(image=photo, text="", width=photo.width(),
                              height=photo.height())
         imgcache.load(f"detail{self.vod_id}", url, on_ready, headers, priority=0)

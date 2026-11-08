@@ -126,7 +126,10 @@ def module_api(path):
                 names.add(node.name)
         elif isinstance(node, ast.Assign):
             for t in node.targets:
-                if isinstance(t, ast.Name) and t.id.isupper():
+                # 下划线开头是平台内部常量（如 win 的 _ES_* 睡眠抑制掩码），
+                # isupper() 对 "_ES_CONTINUOUS" 也返回 True，必须显式排除
+                if (isinstance(t, ast.Name) and t.id.isupper()
+                        and not t.id.startswith("_")):
                     names.add(t.id)
     return names
 

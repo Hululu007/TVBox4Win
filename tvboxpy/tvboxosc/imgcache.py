@@ -13,6 +13,7 @@ import queue
 import re
 import threading
 import time
+import tkinter as tk
 
 import requests
 
@@ -25,9 +26,6 @@ _seq = itertools.count()
 _started = False
 _lock = threading.Lock()
 _local = threading.local()
-
-# 运行中的 tk.PhotoImage 引用，防止被 GC 后图片消失
-_keep = {}
 
 # 失败黑名单：key → 过期时间戳（秒），避免同一坏图反复重试
 _FAIL_TTL = 120
@@ -216,9 +214,41 @@ def load(widget_key, url, on_ready, headers=None, priority=1, size=None):
             lambda p: on_ready(widget_key, p)))
 
 
-def keep(widget_key, photo):
-    _keep[widget_key] = photo
+def attach(widget, photo):
+    """把 PhotoImage 挂到控件上（替代旧的全局 _keep 字典）。
 
+    tk.Label 只记住 Tk 图像名，不持有 Python 对象；PhotoImage 一旦被 GC，
+    Tk 图像随之删除，控件就变成空白。所以引用必须有人持有——挂在控件自己
+    身上最合适：控件销毁 → 引用归零 → 图像释放，生命周期天然对齐。
 
-def drop(widget_key):
-    _keep.pop(widget_key, None)
+    旧的全局字典按 key 累加，页面 destroy 时无人清理：一张 238x312 海报
+    常驻约 307KB，逛几百部片就是上百 MB 不释放。
+
+    只挂引用还不够：imgcache 工作线程可能在回调执行完很久之后才丢掉闭包里
+    的最后一个引用，届时 PhotoImage.__del__ 会从工作线程调 Tk 的
+    image delete（跨线程，报 "main thread is not in main loop"，且图像对象
+    泄漏在 Tk 解释器里）。所以控件销毁时在主线程（<Destroy> 事件）主动删图
+    并清空 name，让之后的 __del__ 变成空操作。
+    """
+    try:
+        widget.image = photo
+    except (AttributeError, tk.TclError):
+        pass
+
+    def _release(_event, photo=photo, widget=widget):
+        try:
+            widget.image = None
+        except Exception:
+            pass
+        name = getattr(photo, "name", "")
+        if name:
+            try:
+                widget.tk.call("image", "delete", name)
+            except tk.TclError:
+                pass
+            photo.name = ""   # 已删，之后的 __del__ 不再触碰 Tk
+
+    try:
+        widget.bind("<Destroy>", _release, add="+")
+    except tk.TclError:
+        pass
