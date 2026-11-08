@@ -2,6 +2,10 @@
 
 **TVBox4Win** — 安卓 TV 上那个影视聚合播放器 TVBox，在 Windows / macOS 上的一次完整复刻。
 
+![TVBox4Win 主界面](docs/screenshot-home.png)
+
+*主界面：首页豆瓣推荐 + 海报墙（1280×800 实机截图）*
+
 当前版本：**v0.9.6.8**（Windows / macOS 双平台；版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
 
 ## 💡 为什么会有这个项目
