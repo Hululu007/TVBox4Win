@@ -2,7 +2,7 @@
 
 **TVBox4Win** — 安卓 TV 上那个影视聚合播放器 TVBox，在 Windows / macOS 上的一次完整复刻。
 
-当前版本：**v0.9.6.5**（Windows / macOS 双平台；版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
+当前版本：**v0.9.6.8**（Windows / macOS 双平台；版本号见窗口标题 / 设置 → 关于；发版从 [Releases](https://github.com/lddxmyg/TVBox4Win/releases) 下载）
 
 ## 💡 为什么会有这个项目
 
@@ -35,7 +35,7 @@
 
 ## 📥 免安装下载（推荐）
 
-不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases) 下载 Windows 安装包（当前最新为 `TVBox4Win-v0.9.6.5-win64.zip`）：
+不想折腾环境？直接到 [**Releases**](https://github.com/lddxmyg/TVBox4Win/releases) 下载 Windows 安装包（当前最新为 `TVBox4Win-v0.9.6.8-win64.zip`）：
 
 1. 解压到任意可写目录
 2. 双击 `TVBox4Win.exe` 即可使用（libmpv 播放内核已内嵌，**无需安装 Python / mpv**）
@@ -84,7 +84,10 @@
 
 | 版本 | 主要变化 | 下载 |
 |---|---|---|
-| **v0.9.6.5**（最新） | **配置协议与启动体验**：支持加密/包裹配置（Base64、`2423` AES-CBC、`;pk;` AES-ECB）、`clan://` 与本地配置文件、`./`、`../` 相对路径解析；启动加载失败不再要求重启，可「重试 / 更换配置」，网络不可用时自动用缓存并提示 | [v0.9.6.5](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.5) |
+| **v0.9.6.8**（最新） | **内存与打包修复**：海报图片引用改为随控件销毁（一张海报常驻约 300KB，此前只增不减，逛几百部片会涨上百 MB）；Windows 包显式收集 Tcl/Tk，修 PyInstaller 探测失灵导致的「启动即闪退」 | [v0.9.6.8](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.8) |
+| v0.9.6.7 | **搜索体验**：搜索页虚拟键盘（远程搜索 / 删除 / A-Z / 0-9）+ 拼音首字母「猜你想搜」联想；修播放页「更多」面板重复叠加弹窗 | [v0.9.6.7](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.7) |
+| v0.9.6.6 | **功能补齐 P1**：弹幕播放、二维码推送、EPG 回看、直播 m3u 扩展、首页文件夹与翻页、历史/收藏海报页、31 项设置 | [v0.9.6.6](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.6) |
+| v0.9.6.5 | **配置协议与启动体验**：支持加密/包裹配置（Base64、`2423` AES-CBC、`;pk;` AES-ECB）、`clan://` 与本地配置文件、`./`、`../` 相对路径解析；启动加载失败不再要求重启，可「重试 / 更换配置」，网络不可用时自动用缓存并提示 | [v0.9.6.5](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.5) |
 | v0.9.6.4 | **播放失败自动容错 + 爬虫直播源**：播放卡住/起不来时自动重试本线路、再切换其它线路，仍失败给出可点击重试的 ⚠ 提示；支持 `lives[]` type=3 的 py/js/jar 爬虫直播源（`liveContent`），频道可带 `header` | [v0.9.6.4](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.4) |
 | v0.9.6.3 | **修 Jar 爬虫「分类加载失败」**：关闭 JVM 字节码校验，壳守卫解密出的 dex 经转换后缺 StackMapTable 不再触发 `VerifyError`（如 YpanSoGuard）；分类加载失败时给出可读提示并支持点击重试 | [v0.9.6.3](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.3) |
 | v0.9.6.2 | **播放解析对齐原版**：parse type 0/1/2/3/4 全语义、配置 hosts 与嗅探/过滤规则、扩展嗅探正则、本地 `/proxy` 直播代理（m3u8 分片改写 + 请求头透传）、py 爬虫 `localProxy` 接入 | [v0.9.6.2](https://github.com/lddxmyg/TVBox4Win/releases/tag/v0.9.6.2) |
