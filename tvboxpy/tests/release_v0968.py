@@ -27,6 +27,11 @@ def _gai(host, port, *args, **kwargs):
 
 socket.getaddrinfo = _gai
 
+# 沙箱环境的 HTTP(S)_PROXY 对 github.com 返回 502，这里绕开代理直连
+# （配合上面的 IP 固定；getaddrinfo 在 trust_env 下同样生效）
+S = requests.Session()
+S.trust_env = False
+
 REPO = "lddxmyg/TVBox4Win"
 TAG = "v0.9.6.8"
 NAME = "TVBox4Win v0.9.6.8"
@@ -125,16 +130,16 @@ def main():
     h = {"Authorization": "token " + tok,
          "Accept": "application/vnd.github+json"}
 
-    r = requests.get(f"https://api.github.com/repos/{REPO}/releases/tags/{TAG}", headers=h)
+    r = S.get(f"https://api.github.com/repos/{REPO}/releases/tags/{TAG}", headers=h)
     if r.status_code == 200:
         rel = r.json()
         print("release exists:", rel["html_url"])
-        r = requests.patch(f"https://api.github.com/repos/{REPO}/releases/{rel['id']}",
+        r = S.patch(f"https://api.github.com/repos/{REPO}/releases/{rel['id']}",
                            headers=h, json={"name": NAME, "body": BODY})
         r.raise_for_status()
         rel = r.json()
     else:
-        r = requests.post(f"https://api.github.com/repos/{REPO}/releases",
+        r = S.post(f"https://api.github.com/repos/{REPO}/releases",
                           headers=h, json={
                               "tag_name": TAG,
                               "target_commitish": "main",
@@ -157,13 +162,13 @@ def main():
             print("missing, skipped:", path)
             continue
         with open(path, "rb") as f:
-            r = requests.post(upload,
+            r = S.post(upload,
                               headers={**h, "Content-Type": "application/zip"},
                               params={"name": name}, data=f)
         r.raise_for_status()
         print("uploaded:", name, r.json()["browser_download_url"])
 
-    r = requests.get(f"https://api.github.com/repos/{REPO}/releases", headers=h)
+    r = S.get(f"https://api.github.com/repos/{REPO}/releases", headers=h)
     print("== 远端 release 清单 ==")
     for rel in r.json()[:5]:
         print(" -", rel["tag_name"], "|", len(rel["assets"]), "assets")
